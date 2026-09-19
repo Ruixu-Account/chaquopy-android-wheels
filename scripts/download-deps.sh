@@ -16,7 +16,7 @@ DEPS=(
   "chaquopy-libffi/chaquopy_libffi-3.3-3-py3-none-android_24_arm64_v8a.whl"
   "chaquopy-libgfortran/chaquopy_libgfortran-4.9-0-py3-none-android_21_arm64_v8a.whl"
   "chaquopy-openblas/chaquopy_openblas-0.2.20-5-py3-none-android_21_arm64_v8a.whl"
-  "chaquopy-libyaml/chaquopy_libyaml-0.2.5-0-py3-none-android_21_arm64_v8a.whl"
+  "chaquopy-libyaml/chaquopy_libyaml-0.2.5-0-py3-none-android_24_arm64_v8a.whl"
 )
 
 # ===== 预构建最终产物（直接使用，跳过编译）=====
