@@ -94,14 +94,14 @@ jobs:
           p = "/opt/chaquopy/server/pypi/build-wheel.py"
           src = open(p).read()
 
-          # Patch 1: maturin 从文件名解析 Python 版本
+          # Patch 1
           old1 = 'python_executable=f"{self.build_env}/bin/python")'
           new1 = 'python_executable=f"{self.build_env}/bin/python{self.python}")'
           if old1 not in src:
               raise SystemExit("patch1 target not found")
           src = src.replace(old1, new1, 1)
 
-          # Patch 2: 告诉 maturin/pyo3 Android 的 libpython 在哪
+          # Patch 2
           old2 = ('            "PYO3_CROSS_PYTHON_VERSION": self.python,\n'
                   '        })')
           new2 = ('            "PYO3_CROSS_PYTHON_VERSION": self.python,\n'
@@ -111,14 +111,14 @@ jobs:
               raise SystemExit("patch2 target not found")
           src = src.replace(old2, new2, 1)
 
-          # Patch 3: abi3 包需要 libpython3.so 软链接（正则匹配，不依赖缩进）
-          pat = re.compile(
+          # Patch 3
+          pat3 = re.compile(
               r'(for name in \["pthread", "rt"\]:\s*\n\s*run\(f"[^"]*lib\{name\}\.a"\))'
           )
-          m = pat.search(src)
-          if not m:
+          m3 = pat3.search(src)
+          if not m3:
               raise SystemExit("patch3 anchor not found")
-          insertion = (
+          insertion3 = (
               '\n        if self.needs_python:\n'
               '            lib_dir = f"{self.host_env}/chaquopy/lib"\n'
               '            py_lib = f"{lib_dir}/libpython{self.python}.so"\n'
@@ -126,17 +126,27 @@ jobs:
               '            if exists(py_lib) and not exists(generic_lib):\n'
               '                run(f"ln -s libpython{self.python}.so {generic_lib}")'
           )
-          src = src[:m.end()] + insertion + src[m.end():]
+          src = src[:m3.end()] + insertion3 + src[m3.end():]
+
+          # Patch 4: abi3 包 DT_NEEDED 里记录 libpython3.so，放行
+          old4 = ('            if tag.entry.d_tag == "DT_NEEDED":\n'
+                  '                req = COMPILER_LIBS.get(tag.needed)')
+          new4 = ('            if tag.entry.d_tag == "DT_NEEDED":\n'
+                  '                if tag.needed == "libpython3.so":\n'
+                  '                    continue\n'
+                  '                req = COMPILER_LIBS.get(tag.needed)')
+          if old4 not in src:
+              raise SystemExit("patch4 target not found")
+          src = src.replace(old4, new4, 1)
 
           open(p, "w").write(src)
-          print("=== 3 patches ok ===")
+          print("=== 4 patches ok ===")
           PY
-          echo "=== verify patch1 ==="
+          echo "=== verify ==="
           grep -n "python_executable=" /opt/chaquopy/server/pypi/build-wheel.py
-          echo "=== verify patch2 ==="
           grep -n "PYO3_CROSS_LIB_DIR" /opt/chaquopy/server/pypi/build-wheel.py
-          echo "=== verify patch3 ==="
           grep -n "generic_lib" /opt/chaquopy/server/pypi/build-wheel.py
+          grep -n "libpython3.so" /opt/chaquopy/server/pypi/build-wheel.py
           
       - name: Download Android Python target
         run: |
