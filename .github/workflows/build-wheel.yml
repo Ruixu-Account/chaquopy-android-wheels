@@ -96,22 +96,14 @@ jobs:
               raise SystemExit("patch2 target not found")
           src = src.replace(old2, new2, 1)
 
-          old3 = 'f"PREFIX={self.host_env}/chaquopy; "'
-          new3 = 'f"export PREFIX={self.host_env}/chaquopy; "'
-          if old3 not in src:
-              raise SystemExit("patch3 target not found")
-          src = src.replace(old3, new3, 1)
-
           open(p, "w").write(src)
-          print("=== all 3 patches ok ===")
+          print("=== both patches ok ===")
           PY
           echo "=== verify patch1 ==="
           grep -n "python_executable=" /opt/chaquopy/server/pypi/build-wheel.py
           echo "=== verify patch2 ==="
           grep -n "PYO3_CROSS_LIB_DIR" /opt/chaquopy/server/pypi/build-wheel.py
-          echo "=== verify patch3 ==="
-          grep -n "export PREFIX=" /opt/chaquopy/server/pypi/build-wheel.py
-          
+
       - name: Download Android Python target
         run: |
           cd /opt/chaquopy
@@ -168,10 +160,11 @@ jobs:
           set -e
           PKG="${{ inputs.package }}"
           VER="${{ inputs.version }}"
-          RECIPE_DIR=/tmp/recipe-$PKG
+          RECIPE_DIR=/opt/chaquopy/server/pypi/packages/astrbot-$PKG
 
-          rm -rf "$RECIPE_DIR"
-          mkdir -p "$RECIPE_DIR/src"
+          sudo rm -rf "$RECIPE_DIR"
+          sudo mkdir -p "$RECIPE_DIR/src"
+          sudo chown -R "$USER:$USER" "$RECIPE_DIR"
 
           SDIST_URL=$(curl -s "https://pypi.org/pypi/$PKG/$VER/json" \
             | jq -r '.urls[] | select(.packagetype=="sdist") | .url' | head -n1)
@@ -221,12 +214,19 @@ jobs:
           cat "$RECIPE_DIR/meta.yaml"
 
       - name: Build wheel
+        env:
+          CARGO_BUILD_JOBS: "1"
         run: |
           cd /opt/chaquopy/server/pypi
+          set +e
           python build-wheel.py \
             --python ${{ inputs.python }} \
             --abi arm64-v8a \
-            /tmp/recipe-${{ inputs.package }}
+            /opt/chaquopy/server/pypi/packages/astrbot-${{ inputs.package }} 2>&1 | tee /tmp/build.log
+          RC=${PIPESTATUS[0]}
+          echo "=== last 60 lines ==="
+          tail -60 /tmp/build.log
+          exit $RC
 
       - name: List built wheels
         if: always()
@@ -234,7 +234,7 @@ jobs:
           echo "=== dist ==="
           find /opt/chaquopy/server/pypi/dist -name "*.whl" -exec ls -la {} \; || true
           echo "=== recipe build dir ==="
-          find /tmp/recipe-${{ inputs.package }} -name "*.whl" -exec ls -la {} \; || true
+          find /opt/chaquopy/server/pypi/packages/astrbot-${{ inputs.package }} -name "*.whl" -exec ls -la {} \; || true
 
       - name: Upload wheel artifact
         if: success()
