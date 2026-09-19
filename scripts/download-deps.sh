@@ -22,6 +22,7 @@ DEPS=(
 # ===== 预构建最终产物（直接使用，跳过编译）=====
 PREBUILT=(
   "lxml/lxml-5.3.0-0-cp312-cp312-android_24_arm64_v8a.whl"
+  "cryptography/cryptography-42.0.8-0-cp312-cp312-android_24_arm64_v8a.whl"
 )
 
 download_one() {
