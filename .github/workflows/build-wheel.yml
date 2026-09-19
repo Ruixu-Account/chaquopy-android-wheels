@@ -1,0 +1,120 @@
+name: Build Android Wheel
+
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: 'PyPI package name (e.g. jiter)'
+        required: true
+        default: 'jiter'
+      version:
+        description: 'Package version (e.g. 0.8.0)'
+        required: true
+        default: '0.8.0'
+      python:
+        description: 'Python version'
+        required: true
+        default: '3.12'
+        type: choice
+        options:
+          - '3.12'
+          - '3.13'
+      abi:
+        description: 'Android ABI'
+        required: true
+        default: 'arm64-v8a'
+        type: choice
+        options:
+          - 'arm64-v8a'
+          - 'x86_64'
+          - 'armeabi-v7a'
+      apply_patch:
+        description: 'Apply local patch from patches/<package>.patch if exists'
+        required: false
+        default: true
+        type: boolean
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android,armv7-linux-androideabi
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r26b
+
+      - name: Clone Chaquopy ${{ github.event.inputs.python == '3.13' && '17.0.0' || '17.0.0' }}
+        run: |
+          git clone --depth 1 --branch 17.0.0 https://github.com/chaquo/chaquopy.git /opt/chaquopy
+
+      - name: Install Chaquopy build requirements
+        run: |
+          pip install -r /opt/chaquopy/server/pypi/requirements.txt
+
+      - name: Download Android Python target
+        run: |
+          cd /opt/chaquopy/server/pypi
+          ./target/download-target.sh maven/com/chaquo/python/target/${{ github.event.inputs.python }}.12-0
+
+      - name: Download source distribution
+        run: |
+          cd /tmp
+          pip download ${{ github.event.inputs.package }}==${{ github.event.inputs.version }} \
+            --no-binary :all: --no-deps
+          ls -la
+
+      - name: Extract source
+        run: |
+          cd /tmp
+          tar xzf ${{ github.event.inputs.package }}-${{ github.event.inputs.version }}.tar.gz
+          ls -la ${{ github.event.inputs.package }}-${{ github.event.inputs.version }}
+
+      - name: Apply local patch if exists
+        if: ${{ github.event.inputs.apply_patch == 'true' }}
+        run: |
+          PATCH_FILE="${{ github.workspace }}/patches/${{ github.event.inputs.package }}.patch"
+          if [ -f "$PATCH_FILE" ]; then
+            echo "Applying patch: $PATCH_FILE"
+            cd /tmp/${{ github.event.inputs.package }}-${{ github.event.inputs.version }}
+            patch -p1 < "$PATCH_FILE"
+          else
+            echo "No patch found for ${{ github.event.inputs.package }}, skipping."
+          fi
+
+      - name: Build wheel
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_SDK_ROOT }}
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          cd /opt/chaquopy/server/pypi
+          ./build-wheel.py \
+            --python ${{ github.event.inputs.python }} \
+            --abi ${{ github.event.inputs.abi }} \
+            /tmp/${{ github.event.inputs.package }}-${{ github.event.inputs.version }}
+
+      - name: List built wheels
+        run: |
+          ls -la /opt/chaquopy/server/pypi/dist/
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event.inputs.package }}-${{ github.event.inputs.version }}-${{ github.event.inputs.python }}-${{ github.event.inputs.abi }}
+          path: /opt/chaquopy/server/pypi/dist/*.whl
+          retention-days: 90
