@@ -236,11 +236,24 @@ jobs:
           find /opt/chaquopy/server/pypi/dist -name "*.whl" -exec ls -la {} \; || true
           echo "=== recipe build dir ==="
           find /opt/chaquopy/server/pypi/packages/astrbot-${{ inputs.package }} -name "*.whl" -exec ls -la {} \; || true
+          
+      - name: Collect wheels
+        if: always()
+        run: |
+          mkdir -p /tmp/all-wheels
+          find /opt/chaquopy/server/pypi -name "*.whl" -exec cp -v {} /tmp/all-wheels/ \;
+          echo "=== collected ==="
+          ls -la /tmp/all-wheels/
+          if [ -z "$(ls -A /tmp/all-wheels)" ]; then
+            echo "ERROR: no wheel found"
+            exit 1
+          fi
 
       - name: Upload wheel artifact
         if: success()
         uses: actions/upload-artifact@v4
         with:
           name: ${{ inputs.package }}-${{ inputs.version }}-${{ inputs.python }}-arm64
-          path: /opt/chaquopy/server/pypi/dist/**/*.whl
+          path: /tmp/all-wheels/*.whl
+          if-no-files-found: error
           retention-days: 90
