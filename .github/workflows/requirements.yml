@@ -47,6 +47,9 @@ jobs:
           ls -la /opt/chaquopy/server/pypi/
           echo "=== packages ==="
           ls /opt/chaquopy/server/pypi/packages/ 2>&1 | head -50 || echo "packages missing"
+          ls /opt/chaquopy/server/pypi/packages/ | head -20
+          echo "---"
+          ls -d /opt/chaquopy/server/pypi/packages/{lxml,pillow,numpy,cffi} 2>&1
       - name: Freeze
         run: |
           /tmp/venv/bin/pip freeze > requirements.txt
