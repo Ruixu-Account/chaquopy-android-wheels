@@ -67,12 +67,31 @@ build_one() {
         cp -a "$OFFICIAL" "$RECIPE_DIR"
 
         python3 - "$RECIPE_DIR/meta.yaml" "$PKG_LOWER" "$VER" <<'PYEOF'
-import re, sys, yaml
+import os, re, sys
+import yaml
+from jinja2 import Template, StrictUndefined
+
 meta_file, pkg, ver = sys.argv[1], sys.argv[2], sys.argv[3]
+
 with open(meta_file) as f:
-    meta = yaml.safe_load(f)
+    raw = f.read()
+
+# 1. 渲染 Jinja（PY_VER 从环境变量读）
+meta_vars = {"PY_VER": os.environ.get("PYTHON_VER", "3.12")}
+try:
+    rendered = Template(raw, undefined=StrictUndefined).render(**meta_vars)
+except Exception as e:
+    print(f"Jinja render failed: {e}", file=sys.stderr)
+    sys.exit(1)
+
+# 2. 解析 YAML
+meta = yaml.safe_load(rendered)
+
+# 3. 改版本号
 meta.setdefault("package", {})["name"] = pkg
 meta["package"]["version"] = ver
+
+# 4. 处理 source
 src = meta.get("source")
 if isinstance(src, dict):
     if "url" in src:
@@ -81,15 +100,19 @@ if isinstance(src, dict):
             f'{pkg}-{ver}.tar.gz', src["url"], flags=re.IGNORECASE)
         src.pop("sha256", None)
         src.pop("md5", None)
-    elif "git_rev" in src:
-        src["git_rev"] = ver
+    if "git_rev" in src:
+        old_rev = str(src["git_rev"])
+        m = re.match(r'^([^\d]*)', old_rev)
+        prefix = m.group(1) if m else ""
+        src["git_rev"] = f"{prefix}{ver}"
 elif src in (None, "pypi"):
     meta["source"] = "pypi"
+
+# 5. 写回
 with open(meta_file, "w") as f:
     yaml.dump(meta, f, default_flow_style=False, allow_unicode=True)
 print(open(meta_file).read())
 PYEOF
-
         [ -f "$WS/LICENSE" ] && [ ! -f "$RECIPE_DIR/LICENSE" ] && \
             cp "$WS/LICENSE" "$RECIPE_DIR/LICENSE"
 
