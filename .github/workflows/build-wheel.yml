@@ -172,6 +172,54 @@ jobs:
           echo "=== meta.yaml ==="
           cat "$RECIPE_DIR/meta.yaml"
 
+      - name: Diagnose Chaquopy lib dir
+        run: |
+          LIB=$(find /tmp/recipe-${{ inputs.package }}/build -type d -name lib -path "*chaquopy*" | head -1)
+          echo "LIB=$LIB"
+          echo "=== lib/ ==="
+          ls -la "$LIB" || true
+          echo "=== lib/python3.12/ ==="
+          ls -la "$LIB/python3.12/" 2>/dev/null || true
+          echo "=== search sysconfigdata ==="
+          find /tmp/recipe-${{ inputs.package }}/build -name "*sysconfigdata*" -o -name "*sysconfig*.py" 2>/dev/null || echo "(none)"
+
+                - name: Inject minimal sysconfigdata for maturin
+        run: |
+          LIB=$(find /tmp/recipe-${{ inputs.package }}/build -type d -name lib -path "*chaquopy*" | head -1)
+          echo "Injecting into: $LIB"
+          if [ -z "$LIB" ]; then
+            echo "ERROR: cannot find chaquopy lib dir"
+            exit 1
+          fi
+
+          cat > "$LIB/_sysconfigdata__linux_aarch64-linux-android.py" <<'EOF'
+          # Minimal sysconfig data for maturin cross-compile detection.
+          build_time_vars = {
+              "SOABI": "cpython-312-aarch64-linux-android",
+              "EXT_SUFFIX": ".cpython-312-aarch64-linux-android.so",
+              "VERSION": "3.12",
+              "LDVERSION": "3.12",
+              "py_version_nodot": "312",
+              "py_version_short": "3.12",
+              "py_version": "3.12.12",
+              "Py_ENABLE_SHARED": 1,
+              "Py_DEBUG": 0,
+              "Py_REF_DEBUG": 0,
+              "abiflags": "",
+              "prefix": "/data/data/com.astrbot.app/files/astrbot_root",
+              "exec_prefix": "/data/data/com.astrbot.app/files/astrbot_root",
+              "CC": "aarch64-linux-android24-clang",
+              "CXX": "aarch64-linux-android24-clang++",
+              "LDSHARED": "aarch64-linux-android24-clang -shared",
+              "CFLAGS": "",
+              "LDFLAGS": "",
+          }
+          EOF
+
+          echo "=== injected ==="
+          ls -la "$LIB"/_sysconfigdata*
+          head -5 "$LIB"/_sysconfigdata*
+          
       - name: Build wheel
         run: |
           cd /opt/chaquopy/server/pypi
