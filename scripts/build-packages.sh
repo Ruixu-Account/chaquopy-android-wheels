@@ -2,8 +2,8 @@
 # 批量构建 Android arm64 wheel
 # 环境变量：
 #   PYTHON_VER       - 如 "3.12"
-#   PACKAGES_INPUT   - 逗号或换行分隔的 "package==version" 列表（优先）
-#   SINGLE_PACKAGE   - 单包模式（PACKAGES_INPUT 为空时用）
+#   PACKAGES_INPUT   - 逗号/空格/换行分隔的 "package==version"（批量，优先）
+#   SINGLE_PACKAGE   - 单包名（PACKAGES_INPUT 为空时用）
 #   SINGLE_VERSION   - 单包版本
 
 set -u
@@ -14,7 +14,7 @@ WS="${GITHUB_WORKSPACE:-/home/runner/work/chaquopy-android-wheels/chaquopy-andro
 
 mkdir -p "$WHEELS_DIR"
 
-# --- 1. 确定包列表 ---
+# ===== 1. 解析包列表 =====
 if [ -n "${PACKAGES_INPUT:-}" ]; then
     RAW="$PACKAGES_INPUT"
 elif [ -n "${SINGLE_PACKAGE:-}" ] && [ -n "${SINGLE_VERSION:-}" ]; then
@@ -23,16 +23,21 @@ else
     echo "ERROR: 未指定包"
     exit 1
 fi
-echo "$RAW" | tr ', ' '\n\n' | tr -d '\r' \
+
+echo "$RAW" \
+    | sed 's/,/ /g' \
+    | tr ' ' '\n' \
+    | tr -d '\r' \
     | sed 's/#.*//' \
     | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
-    | grep -v '^$' > /tmp/packages.txt
+    | grep -v '^$' \
+    | sort -u > /tmp/packages.txt
 
 echo "=== 要构建的包 ==="
 cat /tmp/packages.txt
 echo "====================="
 
-# --- 2. 构建单个包 ---
+# ===== 2. 构建单个包 =====
 build_one() {
     local PKG="$1"
     local VER="$2"
@@ -41,7 +46,19 @@ build_one() {
     local PKG_LOWER
     PKG_LOWER=$(echo "$PKG" | tr '[:upper:]' '[:lower:]')
 
-    # === 官方 recipe 优先 ===
+    # ============ 预构建 wheel 优先 ============
+    local PREBUILT_DIR="$PYPI_DIR/dist/$PKG_LOWER"
+    if [ -d "$PREBUILT_DIR" ]; then
+        local HIT
+        HIT=$(find "$PREBUILT_DIR" -name "*android_*.whl" -name "*${VER}*" 2>/dev/null | head -1)
+        if [ -n "$HIT" ]; then
+            echo "✅ 使用预构建 wheel: $HIT"
+            cp -f "$HIT" "$WHEELS_DIR/"
+            return 0
+        fi
+    fi
+
+    # ============ 官方 recipe 优先 ============
     local OFFICIAL="$PYPI_DIR/packages/$PKG_LOWER"
     if [ -d "$OFFICIAL" ] && [ -f "$OFFICIAL/meta.yaml" ]; then
         echo "✅ 使用官方 recipe: $PKG_LOWER"
@@ -49,7 +66,6 @@ build_one() {
         rm -rf "$RECIPE_DIR"
         cp -a "$OFFICIAL" "$RECIPE_DIR"
 
-        # 用 Python 改 version 和 source
         python3 - "$RECIPE_DIR/meta.yaml" "$PKG_LOWER" "$VER" <<'PYEOF'
 import re, sys, yaml
 meta_file, pkg, ver = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -81,6 +97,7 @@ PYEOF
             sed -i 's/^lto = true/lto = false/' "$RECIPE_DIR/src/Cargo.toml" || true
             sed -i 's/^lto = "fat"/lto = false/' "$RECIPE_DIR/src/Cargo.toml" || true
             sed -i 's/^lto = "thin"/lto = false/' "$RECIPE_DIR/src/Cargo.toml" || true
+            sed -i 's/^codegen-units = 1/codegen-units = 16/' "$RECIPE_DIR/src/Cargo.toml" || true
         fi
 
         if ! (
@@ -103,23 +120,17 @@ PYEOF
         return 0
     fi
 
+    # ============ 官方 recipe 没有，走 PyPI 流程 ============
     echo "ℹ️  官方没有 $PKG 的 recipe，走 PyPI 流程"
-    # ... 保持原有 PyPI 流程不变 ...
-    local PKG="$1"
-    local VER="$2"
-    local RECIPE_DIR="$PYPI_DIR/packages/astrbot-$PKG"
-
     rm -rf "$RECIPE_DIR"
     mkdir -p "$RECIPE_DIR/src"
 
-    # PyPI 校验
     local PYPI_JSON="/tmp/pypi-$PKG.json"
     if ! curl -sf "https://pypi.org/pypi/$PKG/$VER/json" -o "$PYPI_JSON"; then
         echo "ERROR: $PKG==$VER 在 PyPI 上不存在"
         return 1
     fi
 
-    # 找 sdist
     local SDIST_URL
     SDIST_URL=$(jq -r '.urls[] | select(.packagetype=="sdist") | .url' \
         "$PYPI_JSON" | head -n1)
@@ -134,7 +145,6 @@ PYEOF
     wget -q "$SDIST_URL" -O "/tmp/sdist-$PKG.tar.gz" || return 1
     tar -xzf "/tmp/sdist-$PKG.tar.gz" -C /tmp || return 1
 
-    # 定位源目录（连字符 / 下划线 / 通配）
     local SRC_DIR="/tmp/$PKG-$VER"
     [ -d "$SRC_DIR" ] || SRC_DIR="/tmp/${PKG//-/_}-$VER"
     if [ ! -d "$SRC_DIR" ]; then
@@ -148,14 +158,12 @@ PYEOF
     echo "源目录: $SRC_DIR"
     cp -a "$SRC_DIR/." "$RECIPE_DIR/src/" || return 1
 
-    # LICENSE
     if [ -f "$WS/LICENSE" ]; then
         cp "$WS/LICENSE" "$RECIPE_DIR/LICENSE"
     else
         echo "MIT License placeholder" > "$RECIPE_DIR/LICENSE"
     fi
 
-    # Cargo.toml 打补丁
     local HAS_RUST="no"
     if [ -f "$RECIPE_DIR/src/Cargo.toml" ]; then
         HAS_RUST="yes"
@@ -165,8 +173,7 @@ PYEOF
         sed -i 's/^codegen-units = 1/codegen-units = 16/' "$RECIPE_DIR/src/Cargo.toml" || true
     fi
 
-    # 生成 meta.yaml
-     {
+    {
         echo "package:"
         echo "  name: $PKG"
         echo "  version: $VER"
@@ -184,8 +191,6 @@ PYEOF
         echo "    - python"
     } > "$RECIPE_DIR/meta.yaml"
 
-    # 构建
-    local LOG="/tmp/build-$PKG.log"
     if ! (
         cd "$PYPI_DIR"
         python build-wheel.py \
@@ -198,19 +203,16 @@ PYEOF
         return 1
     fi
 
-    # 收集 android wheel
     local NORMALIZED
     NORMALIZED=$(echo "$PKG" | tr '[:upper:]' '[:lower:]' | sed 's/[-_.]\+/-/g')
-    local DIST_DIR="$PYPI_DIR/dist/$NORMALIZED"
-    if [ -d "$DIST_DIR" ]; then
-        find "$DIST_DIR" -name "*android_*.whl" \
+    [ -d "$PYPI_DIR/dist/$NORMALIZED" ] && \
+        find "$PYPI_DIR/dist/$NORMALIZED" -name "*android_*.whl" \
             -exec cp -f {} "$WHEELS_DIR/" \;
-    fi
 
     return 0
 }
 
-# --- 3. 主循环 ---
+# ===== 3. 主循环 =====
 SUCCEEDED=()
 FAILED=()
 
@@ -222,7 +224,7 @@ while IFS= read -r LINE; do
         continue
     fi
 
-    PKG=$(echo "$LINE" | cut -d= -f1 | xargs | tr '[:upper:]' '[:lower:]')
+    PKG=$(echo "$LINE" | cut -d= -f1 | xargs)
     VER=$(echo "$LINE" | cut -d= -f3 | xargs)
 
     if [ -z "$PKG" ] || [ -z "$VER" ]; then
@@ -248,8 +250,16 @@ echo ""
 echo "============================================"
 echo "构建汇总"
 echo "============================================"
-echo "成功: ${SUCCEEDED[*]:-（无）}"
-echo "失败: ${FAILED[*]:-（无）}"
+if [ ${#SUCCEEDED[@]} -gt 0 ]; then
+    echo "成功: ${SUCCEEDED[*]}"
+else
+    echo "成功: （无）"
+fi
+if [ ${#FAILED[@]} -gt 0 ]; then
+    echo "失败: ${FAILED[*]}"
+else
+    echo "失败: （无）"
+fi
 echo "============================================"
 
 echo "=== 收集到的 wheel ==="
