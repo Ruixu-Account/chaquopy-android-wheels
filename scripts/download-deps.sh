@@ -23,6 +23,7 @@ DEPS=(
 PREBUILT=(
   "lxml/lxml-5.3.0-0-cp312-cp312-android_24_arm64_v8a.whl"
   "cryptography/cryptography-42.0.8-0-cp312-cp312-android_24_arm64_v8a.whl"
+  "pandas/pandas-2.1.3-0-cp312-cp312-android_21_arm64_v8a.whl"
 )
 
 download_one() {
