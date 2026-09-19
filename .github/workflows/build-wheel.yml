@@ -75,25 +75,25 @@ jobs:
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;27.3.13750724" || true
           ls -la $ANDROID_HOME/ndk/ || true
 
-      - name: Patch Chaquopy build-wheel.py
+            - name: Patch Chaquopy build-wheel.py
         run: |
           python3 - <<'PY'
           p = "/opt/chaquopy/server/pypi/build-wheel.py"
           src = open(p).read()
 
-          # Patch 1: maturin 从文件名解析 Python 版本
+          # Patch 1
           old1 = 'python_executable=f"{self.build_env}/bin/python")'
           new1 = 'python_executable=f"{self.build_env}/bin/python{self.python}")'
           if old1 not in src:
               raise SystemExit("patch1 target not found")
           src = src.replace(old1, new1, 1)
 
-          # Patch 2: 告诉 maturin/pyo3 Android 的 libpython 在哪
-          old2 = '''            "PYO3_CROSS_PYTHON_VERSION": self.python,
-        })'''
-          new2 = '''            "PYO3_CROSS_PYTHON_VERSION": self.python,
-            "PYO3_CROSS_LIB_DIR": f"{self.host_env}/chaquopy/lib",
-        })'''
+          # Patch 2: 单引号拼接，避免三引号跨行
+          old2 = ('            "PYO3_CROSS_PYTHON_VERSION": self.python,\n'
+                  '        })')
+          new2 = ('            "PYO3_CROSS_PYTHON_VERSION": self.python,\n'
+                  '            "PYO3_CROSS_LIB_DIR": f"{self.host_env}/chaquopy/lib",\n'
+                  '        })')
           if old2 not in src:
               raise SystemExit("patch2 target not found")
           src = src.replace(old2, new2, 1)
@@ -101,7 +101,6 @@ jobs:
           open(p, "w").write(src)
           print("=== both patches ok ===")
           PY
-
           echo "=== verify patch1 ==="
           grep -n "python_executable=" /opt/chaquopy/server/pypi/build-wheel.py
           echo "=== verify patch2 ==="
