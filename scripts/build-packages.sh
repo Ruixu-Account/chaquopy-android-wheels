@@ -96,7 +96,7 @@ build_one() {
     fi
 
     # 生成 meta.yaml
-    {
+     {
         echo "package:"
         echo "  name: $PKG"
         echo "  version: $VER"
@@ -106,8 +106,8 @@ build_one() {
         echo "source:"
         echo "  path: src"
         echo "requirements:"
-        echo "  build:"
         if [ "$HAS_RUST" = "yes" ]; then
+            echo "  build:"
             echo "    - rust"
         fi
         echo "  host:"
