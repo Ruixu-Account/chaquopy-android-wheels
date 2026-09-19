@@ -152,7 +152,7 @@ while IFS= read -r LINE; do
         continue
     fi
 
-    PKG=$(echo "$LINE" | cut -d= -f1 | xargs)
+    PKG=$(echo "$LINE" | cut -d= -f1 | xargs | tr '[:upper:]' '[:lower:]')
     VER=$(echo "$LINE" | cut -d= -f3 | xargs)
 
     if [ -z "$PKG" ] || [ -z "$VER" ]; then
