@@ -38,6 +38,77 @@ build_one() {
     local PKG="$1"
     local VER="$2"
     local RECIPE_DIR="$PYPI_DIR/packages/astrbot-$PKG"
+    local LOG="/tmp/build-$PKG.log"
+    local PKG_LOWER
+    PKG_LOWER=$(echo "$PKG" | tr '[:upper:]' '[:lower:]')
+
+    # === 官方 recipe 优先 ===
+    local OFFICIAL="$PYPI_DIR/packages/$PKG_LOWER"
+    if [ -d "$OFFICIAL" ] && [ -f "$OFFICIAL/meta.yaml" ]; then
+        echo "✅ 使用官方 recipe: $PKG_LOWER"
+
+        rm -rf "$RECIPE_DIR"
+        cp -a "$OFFICIAL" "$RECIPE_DIR"
+
+        # 用 Python 改 version 和 source
+        python3 - "$RECIPE_DIR/meta.yaml" "$PKG_LOWER" "$VER" <<'PYEOF'
+import re, sys, yaml
+meta_file, pkg, ver = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(meta_file) as f:
+    meta = yaml.safe_load(f)
+meta.setdefault("package", {})["name"] = pkg
+meta["package"]["version"] = ver
+src = meta.get("source")
+if isinstance(src, dict):
+    if "url" in src:
+        src["url"] = re.sub(
+            rf'{re.escape(pkg)}-[\d.]+\.(tar\.gz|zip|tgz|tar\.bz2)',
+            f'{pkg}-{ver}.tar.gz', src["url"], flags=re.IGNORECASE)
+        src.pop("sha256", None)
+        src.pop("md5", None)
+    elif "git_rev" in src:
+        src["git_rev"] = ver
+elif src in (None, "pypi"):
+    meta["source"] = "pypi"
+with open(meta_file, "w") as f:
+    yaml.dump(meta, f, default_flow_style=False, allow_unicode=True)
+print(open(meta_file).read())
+PYEOF
+
+        [ -f "$WS/LICENSE" ] && [ ! -f "$RECIPE_DIR/LICENSE" ] && \
+            cp "$WS/LICENSE" "$RECIPE_DIR/LICENSE"
+
+        if [ -f "$RECIPE_DIR/src/Cargo.toml" ]; then
+            sed -i 's/^lto = true/lto = false/' "$RECIPE_DIR/src/Cargo.toml" || true
+            sed -i 's/^lto = "fat"/lto = false/' "$RECIPE_DIR/src/Cargo.toml" || true
+            sed -i 's/^lto = "thin"/lto = false/' "$RECIPE_DIR/src/Cargo.toml" || true
+        fi
+
+        if ! (
+            cd "$PYPI_DIR"
+            python build-wheel.py \
+                --python "$PYTHON_VER" \
+                --abi arm64-v8a \
+                "$RECIPE_DIR" > "$LOG" 2>&1
+        ); then
+            echo "❌ 官方 recipe 构建失败，最后 60 行："
+            tail -60 "$LOG"
+            return 1
+        fi
+
+        local NORMALIZED
+        NORMALIZED=$(echo "$PKG" | tr '[:upper:]' '[:lower:]' | sed 's/[-_.]\+/-/g')
+        [ -d "$PYPI_DIR/dist/$NORMALIZED" ] && \
+            find "$PYPI_DIR/dist/$NORMALIZED" -name "*android_*.whl" \
+                -exec cp -f {} "$WHEELS_DIR/" \;
+        return 0
+    fi
+
+    echo "ℹ️  官方没有 $PKG 的 recipe，走 PyPI 流程"
+    # ... 保持原有 PyPI 流程不变 ...
+    local PKG="$1"
+    local VER="$2"
+    local RECIPE_DIR="$PYPI_DIR/packages/astrbot-$PKG"
 
     rm -rf "$RECIPE_DIR"
     mkdir -p "$RECIPE_DIR/src"
