@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       packages:
-        description: '批量模式：逗号或换行分隔的 package==version（留空则用下面的单包模式）'
+        description: '批量模式：逗号/空格/换行分隔的 package==version（留空则用单包模式）'
         required: false
         default: ''
       package:
@@ -65,8 +65,12 @@ jobs:
 
       - name: Clone Chaquopy 17.0.0
         run: |
-          git clone --depth 1 --branch 17.0.0 \
+          git clone --depth 1 --branch 17.0.0 --recurse-submodules \
             https://github.com/chaquo/chaquopy.git /opt/chaquopy
+          cd /opt/chaquopy
+          git submodule update --init --recursive || true
+          echo "=== packages 数量 ==="
+          ls /opt/chaquopy/server/pypi/packages/ | wc -l
 
       - name: Install Chaquopy build requirements
         run: |
@@ -155,10 +159,10 @@ jobs:
           cd "$INJ"
           zip "$ZIP" jniLibs/arm64-v8a/_sysconfigdata__linux_aarch64-linux-android.py
           unzip -l "$ZIP" | grep sysconfigdata
-          
+
       - name: Download Chaquopy prebuilt deps
         run: bash $GITHUB_WORKSPACE/scripts/download-deps.sh
-        
+
       - name: Build packages
         env:
           CARGO_BUILD_JOBS: "2"
