@@ -155,7 +155,10 @@ jobs:
           cd "$INJ"
           zip "$ZIP" jniLibs/arm64-v8a/_sysconfigdata__linux_aarch64-linux-android.py
           unzip -l "$ZIP" | grep sysconfigdata
-
+          
+      - name: Download Chaquopy prebuilt deps
+        run: bash $GITHUB_WORKSPACE/scripts/download-deps.sh
+        
       - name: Build packages
         env:
           CARGO_BUILD_JOBS: "2"
