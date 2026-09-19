@@ -3,16 +3,20 @@ name: Build Android Wheel
 on:
   workflow_dispatch:
     inputs:
+      packages:
+        description: '批量模式：逗号或换行分隔的 package==version（留空则用下面的单包模式）'
+        required: false
+        default: ''
       package:
-        description: 'PyPI package name (e.g. jiter)'
-        required: true
-        default: 'jiter'
+        description: '单包模式：包名'
+        required: false
+        default: ''
       version:
-        description: 'Package version (e.g. 0.8.0)'
-        required: true
-        default: '0.8.0'
+        description: '单包模式：版本'
+        required: false
+        default: ''
       python:
-        description: 'Python major.minor version'
+        description: 'Python 版本'
         required: true
         default: '3.12'
         type: choice
@@ -20,7 +24,7 @@ on:
           - '3.12'
           - '3.13'
       python_target_version:
-        description: 'Chaquopy Python target version'
+        description: 'Chaquopy Python target 版本'
         required: true
         default: '3.12.12-0'
 
@@ -30,7 +34,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 300
 
     steps:
       - name: Checkout
@@ -51,9 +55,8 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: |
-            /opt/chaquopy/server/pypi/packages/astrbot-${{ inputs.package }}/build
-          key: ${{ inputs.package }}-${{ inputs.version }}-${{ inputs.python }}
+          workspaces: /opt/chaquopy/server/pypi/packages
+          key: astrbot-android-wheels
 
       - name: Install system packages
         run: |
@@ -82,28 +85,7 @@ jobs:
 
       - name: Patch Chaquopy build-wheel.py
         run: |
-          python3 - <<'PY'
-          p = "/opt/chaquopy/server/pypi/build-wheel.py"
-          src = open(p).read()
-
-          old1 = 'python_executable=f"{self.build_env}/bin/python")'
-          new1 = 'python_executable=f"{self.build_env}/bin/python{self.python}")'
-          if old1 not in src:
-              raise SystemExit("patch1 target not found")
-          src = src.replace(old1, new1, 1)
-
-          old2 = ('            "PYO3_CROSS_PYTHON_VERSION": self.python,\n'
-                  '        })')
-          new2 = ('            "PYO3_CROSS_PYTHON_VERSION": self.python,\n'
-                  '            "PYO3_CROSS_LIB_DIR": f"{self.host_env}/chaquopy/lib",\n'
-                  '        })')
-          if old2 not in src:
-              raise SystemExit("patch2 target not found")
-          src = src.replace(old2, new2, 1)
-
-          open(p, "w").write(src)
-          print("=== 2 patches ok ===")
-          PY
+          python3 $GITHUB_WORKSPACE/scripts/patch-build-wheel.py
           grep -n "python_executable=" /opt/chaquopy/server/pypi/build-wheel.py
           grep -n "PYO3_CROSS_LIB_DIR" /opt/chaquopy/server/pypi/build-wheel.py
 
@@ -153,111 +135,20 @@ jobs:
           zip "$ZIP" jniLibs/arm64-v8a/_sysconfigdata__linux_aarch64-linux-android.py
           unzip -l "$ZIP" | grep sysconfigdata
 
-      - name: Prepare recipe directory
-        run: |
-          set -e
-          PKG="${{ inputs.package }}"
-          VER="${{ inputs.version }}"
-          RECIPE_DIR="/opt/chaquopy/server/pypi/packages/astrbot-$PKG"
-
-          rm -rf "$RECIPE_DIR"
-          mkdir -p "$RECIPE_DIR/src"
-
-          if ! curl -sf "https://pypi.org/pypi/$PKG/$VER/json" -o /tmp/pypi.json; then
-            echo "ERROR: $PKG==$VER not found on PyPI"
-            exit 1
-          fi
-          SDIST_URL=$(jq -r '.urls[] | select(.packagetype=="sdist") | .url' /tmp/pypi.json | head -n1)
-          if [ -z "$SDIST_URL" ] || [ "$SDIST_URL" = "null" ]; then
-            echo "ERROR: No sdist found on PyPI for $PKG==$VER"
-            echo "Available files:"
-            jq -r '.urls[].filename' /tmp/pypi.json
-            exit 1
-          fi
-          echo "Downloading sdist: $SDIST_URL"
-          wget -q "$SDIST_URL" -O /tmp/sdist.tar.gz
-          tar -xzf /tmp/sdist.tar.gz -C /tmp
-
-          SRC_DIR="/tmp/$PKG-$VER"
-          if [ ! -d "$SRC_DIR" ]; then
-            SRC_DIR="/tmp/${PKG//-/_}-$VER"
-          fi
-          if [ ! -d "$SRC_DIR" ]; then
-            SRC_DIR=$(find /tmp -maxdepth 1 -type d -name "*${VER}*" -not -name "inject*" | head -1)
-          fi
-          if [ ! -d "$SRC_DIR" ]; then
-            echo "ERROR: sdist dir not found"
-            ls -la /tmp
-            exit 1
-          fi
-          echo "Using source dir: $SRC_DIR"
-          cp -a "$SRC_DIR/." "$RECIPE_DIR/src/"
-
-          cp "$GITHUB_WORKSPACE/LICENSE" "$RECIPE_DIR/LICENSE"
-
-          if [ -f "$RECIPE_DIR/src/Cargo.toml" ]; then
-            sed -i 's/^lto = true/lto = false/' "$RECIPE_DIR/src/Cargo.toml" || true
-            sed -i 's/^lto = "fat"/lto = false/' "$RECIPE_DIR/src/Cargo.toml" || true
-            sed -i 's/^lto = "thin"/lto = false/' "$RECIPE_DIR/src/Cargo.toml" || true
-            sed -i 's/^codegen-units = 1/codegen-units = 16/' "$RECIPE_DIR/src/Cargo.toml" || true
-          fi
-
-          BUILD_REQ=""
-          if [ -f "$RECIPE_DIR/src/Cargo.toml" ]; then
-            BUILD_REQ="              - rust"
-          fi
-
-          cat > "$RECIPE_DIR/meta.yaml" <<EOF
-          package:
-            name: $PKG
-            version: $VER
-          build:
-            number: 0
-            script_env: []
-          source:
-            path: src
-          requirements:
-            build:
-          $BUILD_REQ
-            host:
-              - python
-          EOF
-
-          echo "=== recipe dir ==="
-          ls -la "$RECIPE_DIR"
-          echo "=== meta.yaml ==="
-          cat "$RECIPE_DIR/meta.yaml"
-
-      - name: Build wheel
+      - name: Build packages (batch)
         env:
           CARGO_BUILD_JOBS: "2"
-        run: |
-          cd /opt/chaquopy/server/pypi
-          set +e
-          python build-wheel.py \
-            --python ${{ inputs.python }} \
-            --abi arm64-v8a \
-            /opt/chaquopy/server/pypi/packages/astrbot-${{ inputs.package }} 2>&1 | tee /tmp/build.log
-          RC=${PIPESTATUS[0]}
-          echo "=== last 60 lines ==="
-          tail -60 /tmp/build.log
-          exit $RC
-
-      - name: Collect android wheels
-        if: always()
-        run: |
-          mkdir -p /tmp/all-wheels
-          find /opt/chaquopy/server/pypi -name "*android_*.whl" \
-            -exec cp -v {} /tmp/all-wheels/ \;
-          echo "=== collected ==="
-          ls -la /tmp/all-wheels/
-          test -n "$(ls -A /tmp/all-wheels)" || { echo "ERROR: no android wheel"; exit 1; }
+          PYTHON_VER: ${{ inputs.python }}
+          PACKAGES_INPUT: ${{ inputs.packages }}
+          SINGLE_PACKAGE: ${{ inputs.package }}
+          SINGLE_VERSION: ${{ inputs.version }}
+        run: bash $GITHUB_WORKSPACE/scripts/build-packages.sh
 
       - name: Upload wheel artifact
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ inputs.package }}-${{ inputs.version }}-${{ inputs.python }}-arm64
+          name: wheels-${{ github.run_number }}
           path: /tmp/all-wheels/*.whl
           if-no-files-found: error
           retention-days: 90
