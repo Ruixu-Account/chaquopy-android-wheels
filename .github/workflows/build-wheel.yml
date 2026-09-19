@@ -66,29 +66,15 @@ jobs:
           python3 - <<'PY'
           p = "/opt/chaquopy/server/pypi/build-wheel.py"
           src = open(p).read()
-          old = '''self.builder = build.ProjectBuilder(
-                              self.src_dir, python_executable=f"{self.build_env}/bin/python")'''
-          # ↑ 缩进可能不同，用宽松匹配
-          import re
-          pattern = re.compile(
-              r'self\.builder = build\.ProjectBuilder\(\s*'
-              r'self\.src_dir, python_executable=f"\{self\.build_env\}/bin/python"\)'
-          )
-          if not pattern.search(src):
+          old = 'python_executable=f"{self.build_env}/bin/python")'
+          new = 'python_executable=f"{self.build_env}/bin/python{self.python}")'
+          if old not in src:
               raise SystemExit("=== patch target not found ===")
-          replacement = (
-              'py_ver = self.python or ".".join(map(str, sys.version_info[:2]))\n'
-              '                py_exe = f"{self.build_env}/bin/python{py_ver}"\n'
-              '                if not exists(py_exe):\n'
-              '                    os.symlink(f"{self.build_env}/bin/python", py_exe)\n'
-              '                self.builder = build.ProjectBuilder(\n'
-              '                    self.src_dir, python_executable=py_exe)'
-          )
-          src = pattern.sub(replacement, src, count=1)
+          src = src.replace(old, new, 1)
           open(p, "w").write(src)
           print("=== patched ok ===")
           PY
-          grep -A 6 "py_ver = self.python" /opt/chaquopy/server/pypi/build-wheel.py
+          grep -n "python_executable=" /opt/chaquopy/server/pypi/build-wheel.py
           
       - name: Set Android env vars
         run: |
