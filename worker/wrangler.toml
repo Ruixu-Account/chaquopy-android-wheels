@@ -1,0 +1,7 @@
+name = "wheel"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+
+routes = [
+  { pattern = "wheel.ruixu.cc.cd/*", zone_name = "ruixu.cc.cd" }
+]
