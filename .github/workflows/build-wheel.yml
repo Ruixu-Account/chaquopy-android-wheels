@@ -1,4 +1,4 @@
-name: Build Android Wheel
+name: Build Android Wheel (arm64)
 
 on:
   workflow_dispatch:
@@ -12,38 +12,28 @@ on:
         required: true
         default: '0.8.0'
       python:
-        description: 'Python version'
+        description: 'Python major.minor version'
         required: true
         default: '3.12'
         type: choice
         options:
           - '3.12'
           - '3.13'
-      abi:
-        description: 'Android ABI'
+      python_target_version:
+        description: 'Chaquopy Python target version'
         required: true
-        default: 'arm64-v8a'
-        type: choice
-        options:
-          - 'arm64-v8a'
-          - 'x86_64'
-          - 'armeabi-v7a'
-      apply_patch:
-        description: 'Apply local patch from patches/<package>.patch if exists'
-        required: false
-        default: true
-        type: boolean
+        default: '3.12.12-0'
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
 
     steps:
-      - name: Checkout this repo
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Setup Python (host)
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -51,102 +41,124 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android,x86_64-linux-android,armv7-linux-androideabi
+          targets: aarch64-linux-android
 
-      - name: Setup Android NDK
-        uses: nttld/setup-ndk@v1
-        id: setup-ndk
-        with:
-          ndk-version: r26b
-
-      - name: Install Maven and utilities
+      - name: Install system packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y maven wget unzip
+          sudo apt-get install -y wget unzip patchelf jq
 
-      - name: Verify Android SDK
+      - name: Clone Chaquopy 17.0.0
         run: |
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          ls -la /usr/local/lib/android/sdk || true
-
-      - name: Clone Chaquopy
-        run: |
-          git clone --depth 1 --branch 17.0.0 https://github.com/chaquo/chaquopy.git /opt/chaquopy
+          git clone --depth 1 --branch 17.0.0 \
+            https://github.com/chaquo/chaquopy.git /opt/chaquopy
+          echo "=== /opt/chaquopy/target ==="
+          ls -la /opt/chaquopy/target
+          echo "=== /opt/chaquopy/server/pypi ==="
+          ls -la /opt/chaquopy/server/pypi
 
       - name: Install Chaquopy build requirements
         run: |
           pip install -r /opt/chaquopy/server/pypi/requirements.txt
 
+      - name: Set Android env vars
+        run: |
+          echo "ANDROID_HOME=/usr/local/lib/android/sdk" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=/usr/local/lib/android/sdk" >> $GITHUB_ENV
+          echo "ANDROID_NDK_HOME=/usr/local/lib/android/sdk/ndk/27.3.13750724" >> $GITHUB_ENV
+
+      - name: Pre-install NDK r27c
+        continue-on-error: true
+        run: |
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;27.3.13750724" || true
+          ls -la $ANDROID_HOME/ndk/ || true
+
       - name: Download Android Python target
-        env:
-          ANDROID_HOME: /usr/local/lib/android/sdk
-          ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
         run: |
-          cd /opt/chaquopy/server/pypi
-          ./target/download-target.sh maven/com/chaquo/python/target/3.12.12-0
+          cd /opt/chaquopy
+          ./target/download-target.sh \
+            maven/com/chaquo/python/target/${{ inputs.python_target_version }}
+          echo "=== downloaded zips ==="
+          find /opt/chaquopy/maven -name "*.zip" -exec ls -la {} \;
 
-      - name: Download source distribution
+      - name: Prepare recipe directory
         run: |
-          cd /tmp
-          pip download ${{ github.event.inputs.package }}==${{ github.event.inputs.version }} \
-            --no-binary :all: --no-deps
-          ls -la
+          set -e
+          PKG="${{ inputs.package }}"
+          VER="${{ inputs.version }}"
+          RECIPE_DIR=/tmp/recipe-$PKG
 
-      - name: Extract source
-        run: |
-          cd /tmp
-          tar xzf ${{ github.event.inputs.package }}-${{ github.event.inputs.version }}.tar.gz
-          ls -la ${{ github.event.inputs.package }}-${{ github.event.inputs.version }}
+          rm -rf "$RECIPE_DIR"
+          mkdir -p "$RECIPE_DIR/src"
 
-      - name: Patch jiter Cargo.toml for Android
-        if: ${{ github.event.inputs.package == 'jiter' }}
-        run: |
-          cd /tmp/jiter-${{ github.event.inputs.version }}
-          if [ -f Cargo.toml ]; then
-            echo "=== Original Cargo.toml (profile section) ==="
-            grep -A 5 '\[profile.release\]' Cargo.toml || true
-            sed -i 's/^lto = true/lto = false/' Cargo.toml || true
-            sed -i 's/^codegen-units = 1/codegen-units = 16/' Cargo.toml || true
-            echo "=== Patched Cargo.toml (profile section) ==="
-            grep -A 5 '\[profile.release\]' Cargo.toml || true
-          else
-            echo "Cargo.toml not found!"
+          SDIST_URL=$(curl -s "https://pypi.org/pypi/$PKG/$VER/json" \
+            | jq -r '.urls[] | select(.packagetype=="sdist") | .url' | head -n1)
+          if [ -z "$SDIST_URL" ] || [ "$SDIST_URL" = "null" ]; then
+            echo "ERROR: No sdist found on PyPI for $PKG==$VER"
             exit 1
           fi
+          echo "Downloading sdist: $SDIST_URL"
+          wget -q "$SDIST_URL" -O /tmp/sdist.tar.gz
+          tar -xzf /tmp/sdist.tar.gz -C /tmp
 
-      - name: Apply local patch if exists
-        if: ${{ github.event.inputs.apply_patch == 'true' }}
-        run: |
-          PATCH_FILE="${{ github.workspace }}/patches/${{ github.event.inputs.package }}.patch"
-          if [ -f "$PATCH_FILE" ]; then
-            echo "Applying patch: $PATCH_FILE"
-            cd /tmp/${{ github.event.inputs.package }}-${{ github.event.inputs.version }}
-            patch -p1 < "$PATCH_FILE" || echo "Patch failed or already applied, continuing..."
-          else
-            echo "No patch found for ${{ github.event.inputs.package }}, skipping."
+          if [ ! -d "/tmp/$PKG-$VER" ]; then
+            echo "ERROR: expected /tmp/$PKG-$VER not found"
+            ls -la /tmp
+            exit 1
+          fi
+          cp -a "/tmp/$PKG-$VER/." "$RECIPE_DIR/src/"
+
+          if [ -f "$RECIPE_DIR/src/Cargo.toml" ]; then
+            sed -i 's/^lto = true/lto = false/' "$RECIPE_DIR/src/Cargo.toml" || true
+            sed -i 's/^lto = "fat"/lto = false/' "$RECIPE_DIR/src/Cargo.toml" || true
+            sed -i 's/^lto = "thin"/lto = false/' "$RECIPE_DIR/src/Cargo.toml" || true
+            sed -i 's/^codegen-units = 1/codegen-units = 16/' "$RECIPE_DIR/src/Cargo.toml" || true
+            echo "=== patched Cargo.toml release profile ==="
+            grep -A 5 '\[profile.release\]' "$RECIPE_DIR/src/Cargo.toml" || true
           fi
 
+          cat > "$RECIPE_DIR/meta.yaml" <<EOF
+          package:
+            name: $PKG
+            version: $VER
+          build:
+            number: 0
+            script_env: []
+          source:
+            path: src
+          requirements:
+            build:
+              - rust
+            host:
+              - python
+            run: []
+          EOF
+
+          echo "=== recipe dir ==="
+          ls -la "$RECIPE_DIR"
+          echo "=== meta.yaml ==="
+          cat "$RECIPE_DIR/meta.yaml"
+
       - name: Build wheel
-        env:
-          ANDROID_HOME: /usr/local/lib/android/sdk
-          ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
           cd /opt/chaquopy/server/pypi
-          ./build-wheel.py \
-            --python ${{ github.event.inputs.python }} \
-            --abi ${{ github.event.inputs.abi }} \
-            /tmp/${{ github.event.inputs.package }}-${{ github.event.inputs.version }}
+          python build-wheel.py \
+            --python ${{ inputs.python }} \
+            --abi arm64-v8a \
+            /tmp/recipe-${{ inputs.package }}
 
       - name: List built wheels
+        if: always()
         run: |
-          ls -la /opt/chaquopy/server/pypi/dist/ || true
+          echo "=== dist ==="
+          find /opt/chaquopy/server/pypi/dist -name "*.whl" -exec ls -la {} \; || true
+          echo "=== recipe build dir ==="
+          find /tmp/recipe-${{ inputs.package }} -name "*.whl" -exec ls -la {} \; || true
 
       - name: Upload wheel artifact
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ github.event.inputs.package }}-${{ github.event.inputs.version }}-${{ github.event.inputs.python }}-${{ github.event.inputs.abi }}
-          path: /opt/chaquopy/server/pypi/dist/*.whl
+          name: ${{ inputs.package }}-${{ inputs.version }}-${{ inputs.python }}-arm64
+          path: /opt/chaquopy/server/pypi/dist/**/*.whl
           retention-days: 90
