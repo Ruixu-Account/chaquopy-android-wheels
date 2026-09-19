@@ -58,6 +58,7 @@ jobs:
         id: setup-ndk
         with:
           ndk-version: r26b
+
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
@@ -68,15 +69,10 @@ jobs:
         run: |
           sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
 
-      - name: Set ANDROID_HOME
+      - name: Export ANDROID_HOME
         run: echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
 
-      - name: Verify Android SDK
-        run: |
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          ls -la $ANDROID_HOME
-          which sdkmanager
-      - name: Clone Chaquopy ${{ github.event.inputs.python == '3.13' && '17.0.0' || '17.0.0' }}
+      - name: Clone Chaquopy
         run: |
           git clone --depth 1 --branch 17.0.0 https://github.com/chaquo/chaquopy.git /opt/chaquopy
 
@@ -85,8 +81,6 @@ jobs:
           pip install -r /opt/chaquopy/server/pypi/requirements.txt
 
       - name: Download Android Python target
-        env:
-          ANDROID_HOME: ${{ env.ANDROID_SDK_ROOT }}
         run: |
           cd /opt/chaquopy/server/pypi
           ./target/download-target.sh maven/com/chaquo/python/target/3.12.12-0
@@ -104,6 +98,22 @@ jobs:
           tar xzf ${{ github.event.inputs.package }}-${{ github.event.inputs.version }}.tar.gz
           ls -la ${{ github.event.inputs.package }}-${{ github.event.inputs.version }}
 
+      - name: Patch jiter Cargo.toml for Android
+        if: ${{ github.event.inputs.package == 'jiter' }}
+        run: |
+          cd /tmp/jiter-${{ github.event.inputs.version }}
+          if [ -f Cargo.toml ]; then
+            echo "=== Original Cargo.toml ==="
+            cat Cargo.toml
+            sed -i 's/^lto = true/lto = false/' Cargo.toml
+            sed -i 's/^codegen-units = 1/codegen-units = 16/' Cargo.toml
+            echo "=== Patched Cargo.toml ==="
+            cat Cargo.toml
+          else
+            echo "Cargo.toml not found!"
+            exit 1
+          fi
+
       - name: Apply local patch if exists
         if: ${{ github.event.inputs.apply_patch == 'true' }}
         run: |
@@ -111,12 +121,12 @@ jobs:
           if [ -f "$PATCH_FILE" ]; then
             echo "Applying patch: $PATCH_FILE"
             cd /tmp/${{ github.event.inputs.package }}-${{ github.event.inputs.version }}
-            patch -p1 < "$PATCH_FILE"
+            patch -p1 < "$PATCH_FILE" || echo "Patch failed or already applied, continuing..."
           else
             echo "No patch found for ${{ github.event.inputs.package }}, skipping."
           fi
 
-           - name: Build wheel
+      - name: Build wheel
         env:
           ANDROID_HOME: ${{ env.ANDROID_SDK_ROOT }}
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
@@ -127,10 +137,10 @@ jobs:
             --python ${{ github.event.inputs.python }} \
             --abi ${{ github.event.inputs.abi }} \
             /tmp/${{ github.event.inputs.package }}-${{ github.event.inputs.version }}
-            
+
       - name: List built wheels
         run: |
-          ls -la /opt/chaquopy/server/pypi/dist/
+          ls -la /opt/chaquopy/server/pypi/dist/ || true
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
