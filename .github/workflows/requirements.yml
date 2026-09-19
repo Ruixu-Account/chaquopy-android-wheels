@@ -55,6 +55,20 @@ jobs:
               echo "🔥 $line"
             fi
           done < requirements.txt
+          
+      - name: List Chaquopy built-in recipes
+        run: |
+          echo "=== 官方 recipe 列表 ==="
+          ls /opt/chaquopy/server/pypi/packages/ | sort
+          echo ""
+          echo "=== 我们要找的 ==="
+          for p in lxml pillow numpy pandas libxml2 libxslt libjpeg libpng freetype zlib libffi openssl cffi; do
+            if [ -d "/opt/chaquopy/server/pypi/packages/$p" ]; then
+              echo "✅ $p"
+            else
+              echo "❌ $p"
+            fi
+          done
 
       - name: Upload
         uses: actions/upload-artifact@v4
