@@ -35,7 +35,18 @@ jobs:
           else
             /tmp/venv/bin/pip install astrbot
           fi
-
+      - name: Clone Chaquopy 17.0.0
+        run: |
+          git clone --depth 1 --branch 17.0.0 --recurse-submodules \
+            https://github.com/chaquo/chaquopy.git /opt/chaquopy
+          cd /opt/chaquopy
+          git submodule update --init --recursive || true
+          echo "=== /opt/chaquopy 顶层 ==="
+          ls -la /opt/chaquopy/
+          echo "=== server/pypi ==="
+          ls -la /opt/chaquopy/server/pypi/
+          echo "=== packages ==="
+          ls /opt/chaquopy/server/pypi/packages/ 2>&1 | head -50 || echo "packages missing"
       - name: Freeze
         run: |
           /tmp/venv/bin/pip freeze > requirements.txt
