@@ -177,12 +177,23 @@ jobs:
           wget -q "$SDIST_URL" -O /tmp/sdist.tar.gz
           tar -xzf /tmp/sdist.tar.gz -C /tmp
 
-          if [ ! -d "/tmp/$PKG-$VER" ]; then
-            echo "ERROR: expected /tmp/$PKG-$VER not found"
+          # sdist 解压目录名可能是连字符或下划线，两种都试
+          SRC_DIR="/tmp/$PKG-$VER"
+          if [ ! -d "$SRC_DIR" ]; then
+            SRC_DIR="/tmp/${PKG//-/_}-$VER"
+          fi
+          if [ ! -d "$SRC_DIR" ]; then
+            SRC_DIR=$(find /tmp -maxdepth 1 -type d -name "*${VER}*" -not -name "inject*" | head -1)
+          fi
+          if [ ! -d "$SRC_DIR" ]; then
+            echo "ERROR: sdist dir not found, tried:"
+            echo "  /tmp/$PKG-$VER"
+            echo "  /tmp/${PKG//-/_}-$VER"
             ls -la /tmp
             exit 1
           fi
-          cp -a "/tmp/$PKG-$VER/." "$RECIPE_DIR/src/"
+          echo "Using source dir: $SRC_DIR"
+          cp -a "$SRC_DIR/." "$RECIPE_DIR/src/"
           cp "$GITHUB_WORKSPACE/LICENSE" "$RECIPE_DIR/LICENSE"
           
           if [ -f "$RECIPE_DIR/src/Cargo.toml" ]; then
