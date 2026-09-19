@@ -182,7 +182,8 @@ jobs:
             exit 1
           fi
           cp -a "/tmp/$PKG-$VER/." "$RECIPE_DIR/src/"
-
+          cp "$GITHUB_WORKSPACE/LICENSE" "$RECIPE_DIR/LICENSE"
+          
           if [ -f "$RECIPE_DIR/src/Cargo.toml" ]; then
             sed -i 's/^lto = true/lto = false/' "$RECIPE_DIR/src/Cargo.toml" || true
             sed -i 's/^lto = "fat"/lto = false/' "$RECIPE_DIR/src/Cargo.toml" || true
