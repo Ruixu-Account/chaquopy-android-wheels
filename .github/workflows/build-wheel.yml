@@ -131,7 +131,6 @@ jobs:
               - rust
             host:
               - python
-            run: []
           EOF
 
           echo "=== recipe dir ==="
