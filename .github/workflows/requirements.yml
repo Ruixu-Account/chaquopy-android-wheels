@@ -1,0 +1,64 @@
+name: Dump AstrBot deps
+
+on:
+  workflow_dispatch:
+    inputs:
+      astrbot_version:
+        description: 'AstrBot version (leave empty for latest)'
+        required: false
+        default: ''
+      python:
+        description: 'Python version'
+        required: true
+        default: '3.12'
+        type: choice
+        options:
+          - '3.12'
+          - '3.11'
+
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python }}
+
+      - name: Install AstrBot
+        run: |
+          python -m venv /tmp/venv
+          /tmp/venv/bin/pip install --upgrade pip
+          if [ -n "${{ inputs.astrbot_version }}" ]; then
+            /tmp/venv/bin/pip install "astrbot==${{ inputs.astrbot_version }}"
+          else
+            /tmp/venv/bin/pip install astrbot
+          fi
+
+      - name: Freeze
+        run: |
+          /tmp/venv/bin/pip freeze > requirements.txt
+          echo "=== requirements.txt ==="
+          cat requirements.txt
+
+      - name: Classify (pure python vs native)
+        run: |
+          echo "=== 需要编译的包（Linux 下是 wheel 但 PyPI 上有 sdist 的）==="
+          while read line; do
+            pkg=$(echo "$line" | cut -d= -f1)
+            ver=$(echo "$line" | cut -d= -f3)
+            json=$(curl -s "https://pypi.org/pypi/$pkg/$ver/json")
+            has_sdist=$(echo "$json" | jq -r '[.urls[] | select(.packagetype=="sdist")] | length')
+            has_native=$(echo "$json" | jq -r '[.urls[] | select(.packagetype=="bdist_wheel" and (.filename | test("cp312.*(manylinux|musllinux)")))] | length')
+            if [ "$has_native" != "0" ]; then
+              echo "🔥 $line"
+            fi
+          done < requirements.txt
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: astrbot-requirements-${{ inputs.python }}
+          path: requirements.txt
+          retention-days: 30
