@@ -23,8 +23,10 @@ on:
         description: 'Chaquopy Python target version'
         required: true
         default: '3.12.12-0'
+
 permissions:
   contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -46,6 +48,13 @@ jobs:
         with:
           targets: aarch64-linux-android
 
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            /opt/chaquopy/server/pypi/packages/astrbot-${{ inputs.package }}/build
+          key: ${{ inputs.package }}-${{ inputs.version }}-${{ inputs.python }}
+
       - name: Install system packages
         run: |
           sudo apt-get update
@@ -55,10 +64,6 @@ jobs:
         run: |
           git clone --depth 1 --branch 17.0.0 \
             https://github.com/chaquo/chaquopy.git /opt/chaquopy
-          echo "=== /opt/chaquopy/target ==="
-          ls -la /opt/chaquopy/target
-          echo "=== /opt/chaquopy/server/pypi ==="
-          ls -la /opt/chaquopy/server/pypi
 
       - name: Install Chaquopy build requirements
         run: |
@@ -74,7 +79,6 @@ jobs:
         continue-on-error: true
         run: |
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;27.3.13750724" || true
-          ls -la $ANDROID_HOME/ndk/ || true
 
       - name: Patch Chaquopy build-wheel.py
         run: |
@@ -98,11 +102,9 @@ jobs:
           src = src.replace(old2, new2, 1)
 
           open(p, "w").write(src)
-          print("=== both patches ok ===")
+          print("=== 2 patches ok ===")
           PY
-          echo "=== verify patch1 ==="
           grep -n "python_executable=" /opt/chaquopy/server/pypi/build-wheel.py
-          echo "=== verify patch2 ==="
           grep -n "PYO3_CROSS_LIB_DIR" /opt/chaquopy/server/pypi/build-wheel.py
 
       - name: Download Android Python target
@@ -110,7 +112,6 @@ jobs:
           cd /opt/chaquopy
           ./target/download-target.sh \
             maven/com/chaquo/python/target/${{ inputs.python_target_version }}
-          echo "=== downloaded zips ==="
           find /opt/chaquopy/maven -name "*.zip" -exec ls -la {} \;
 
       - name: Inject sysconfigdata into target zip
@@ -118,10 +119,8 @@ jobs:
           ZIP="/opt/chaquopy/maven/com/chaquo/python/target/${{ inputs.python_target_version }}/target-${{ inputs.python_target_version }}-arm64-v8a.zip"
           if [ ! -f "$ZIP" ]; then
             echo "ERROR: target zip not found: $ZIP"
-            find /opt/chaquopy/maven -name "*.zip"
             exit 1
           fi
-          echo "ZIP=$ZIP"
 
           PY_VER="${{ inputs.python }}"
           PY_VER_NODOT="${PY_VER//./}"
@@ -152,32 +151,33 @@ jobs:
 
           cd "$INJ"
           zip "$ZIP" jniLibs/arm64-v8a/_sysconfigdata__linux_aarch64-linux-android.py
-
-          echo "=== verify in zip ==="
-          unzip -l "$ZIP" | grep sysconfigdata || { echo "NOT FOUND IN ZIP"; exit 1; }
+          unzip -l "$ZIP" | grep sysconfigdata
 
       - name: Prepare recipe directory
         run: |
           set -e
           PKG="${{ inputs.package }}"
           VER="${{ inputs.version }}"
-          RECIPE_DIR=/opt/chaquopy/server/pypi/packages/astrbot-$PKG
+          RECIPE_DIR="/opt/chaquopy/server/pypi/packages/astrbot-$PKG"
 
-          sudo rm -rf "$RECIPE_DIR"
-          sudo mkdir -p "$RECIPE_DIR/src"
-          sudo chown -R "$USER:$USER" "$RECIPE_DIR"
+          rm -rf "$RECIPE_DIR"
+          mkdir -p "$RECIPE_DIR/src"
 
-          SDIST_URL=$(curl -s "https://pypi.org/pypi/$PKG/$VER/json" \
-            | jq -r '.urls[] | select(.packagetype=="sdist") | .url' | head -n1)
+          if ! curl -sf "https://pypi.org/pypi/$PKG/$VER/json" -o /tmp/pypi.json; then
+            echo "ERROR: $PKG==$VER not found on PyPI"
+            exit 1
+          fi
+          SDIST_URL=$(jq -r '.urls[] | select(.packagetype=="sdist") | .url' /tmp/pypi.json | head -n1)
           if [ -z "$SDIST_URL" ] || [ "$SDIST_URL" = "null" ]; then
             echo "ERROR: No sdist found on PyPI for $PKG==$VER"
+            echo "Available files:"
+            jq -r '.urls[].filename' /tmp/pypi.json
             exit 1
           fi
           echo "Downloading sdist: $SDIST_URL"
           wget -q "$SDIST_URL" -O /tmp/sdist.tar.gz
           tar -xzf /tmp/sdist.tar.gz -C /tmp
 
-          # sdist 解压目录名可能是连字符或下划线，两种都试
           SRC_DIR="/tmp/$PKG-$VER"
           if [ ! -d "$SRC_DIR" ]; then
             SRC_DIR="/tmp/${PKG//-/_}-$VER"
@@ -186,23 +186,25 @@ jobs:
             SRC_DIR=$(find /tmp -maxdepth 1 -type d -name "*${VER}*" -not -name "inject*" | head -1)
           fi
           if [ ! -d "$SRC_DIR" ]; then
-            echo "ERROR: sdist dir not found, tried:"
-            echo "  /tmp/$PKG-$VER"
-            echo "  /tmp/${PKG//-/_}-$VER"
+            echo "ERROR: sdist dir not found"
             ls -la /tmp
             exit 1
           fi
           echo "Using source dir: $SRC_DIR"
           cp -a "$SRC_DIR/." "$RECIPE_DIR/src/"
+
           cp "$GITHUB_WORKSPACE/LICENSE" "$RECIPE_DIR/LICENSE"
-          
+
           if [ -f "$RECIPE_DIR/src/Cargo.toml" ]; then
             sed -i 's/^lto = true/lto = false/' "$RECIPE_DIR/src/Cargo.toml" || true
             sed -i 's/^lto = "fat"/lto = false/' "$RECIPE_DIR/src/Cargo.toml" || true
             sed -i 's/^lto = "thin"/lto = false/' "$RECIPE_DIR/src/Cargo.toml" || true
             sed -i 's/^codegen-units = 1/codegen-units = 16/' "$RECIPE_DIR/src/Cargo.toml" || true
-            echo "=== patched Cargo.toml release profile ==="
-            grep -A 5 '\[profile.release\]' "$RECIPE_DIR/src/Cargo.toml" || true
+          fi
+
+          BUILD_REQ=""
+          if [ -f "$RECIPE_DIR/src/Cargo.toml" ]; then
+            BUILD_REQ="              - rust"
           fi
 
           cat > "$RECIPE_DIR/meta.yaml" <<EOF
@@ -216,7 +218,7 @@ jobs:
             path: src
           requirements:
             build:
-              - rust
+          $BUILD_REQ
             host:
               - python
           EOF
@@ -228,7 +230,7 @@ jobs:
 
       - name: Build wheel
         env:
-          CARGO_BUILD_JOBS: "1"
+          CARGO_BUILD_JOBS: "2"
         run: |
           cd /opt/chaquopy/server/pypi
           set +e
@@ -241,37 +243,16 @@ jobs:
           tail -60 /tmp/build.log
           exit $RC
 
-      - name: List built wheels
-        if: always()
-        run: |
-          echo "=== dist ==="
-          find /opt/chaquopy/server/pypi/dist -name "*.whl" -exec ls -la {} \; || true
-          echo "=== recipe build dir ==="
-          find /opt/chaquopy/server/pypi/packages/astrbot-${{ inputs.package }} -name "*.whl" -exec ls -la {} \; || true
-          
-      - name: Collect wheels
+      - name: Collect android wheels
         if: always()
         run: |
           mkdir -p /tmp/all-wheels
-          find /opt/chaquopy/server/pypi -name "*.whl" -exec cp -v {} /tmp/all-wheels/ \;
+          find /opt/chaquopy/server/pypi -name "*android_*.whl" \
+            -exec cp -v {} /tmp/all-wheels/ \;
           echo "=== collected ==="
           ls -la /tmp/all-wheels/
-          if [ -z "$(ls -A /tmp/all-wheels)" ]; then
-            echo "ERROR: no wheel found"
-            exit 1
-          fi
-          
-      - name: Upload to GitHub Release (latest)
-        if: success()
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: latest
-          name: "Latest Builds"
-          body: "Auto-built wheels. Last: ${{ inputs.package }}-${{ inputs.version }}"
-          files: /tmp/all-wheels/*android_*.whl
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          
+          test -n "$(ls -A /tmp/all-wheels)" || { echo "ERROR: no android wheel"; exit 1; }
+
       - name: Upload wheel artifact
         if: success()
         uses: actions/upload-artifact@v4
@@ -280,3 +261,15 @@ jobs:
           path: /tmp/all-wheels/*.whl
           if-no-files-found: error
           retention-days: 90
+
+      - name: Upload to GitHub Release (latest)
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: "Latest Builds"
+          body: "Auto-built Android arm64 wheels."
+          files: /tmp/all-wheels/*.whl
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
