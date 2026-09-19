@@ -23,8 +23,7 @@ else
     echo "ERROR: 未指定包"
     exit 1
 fi
-
-echo "$RAW" | tr ',' '\n' | tr -d '\r' \
+echo "$RAW" | tr ', ' '\n\n' | tr -d '\r' \
     | sed 's/#.*//' \
     | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
     | grep -v '^$' > /tmp/packages.txt
