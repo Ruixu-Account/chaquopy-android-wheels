@@ -59,18 +59,16 @@ jobs:
         with:
           ndk-version: r26b
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Accept Android SDK licenses
-        run: yes | sdkmanager --licenses || true
-
-      - name: Install Android SDK components
+      - name: Install Maven and utilities
         run: |
-          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+          sudo apt-get update
+          sudo apt-get install -y maven wget unzip
 
-      - name: Export ANDROID_HOME
-        run: echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
+      - name: Verify Android SDK
+        run: |
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          ls -la /usr/local/lib/android/sdk || true
 
       - name: Clone Chaquopy
         run: |
@@ -81,6 +79,9 @@ jobs:
           pip install -r /opt/chaquopy/server/pypi/requirements.txt
 
       - name: Download Android Python target
+        env:
+          ANDROID_HOME: /usr/local/lib/android/sdk
+          ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
         run: |
           cd /opt/chaquopy/server/pypi
           ./target/download-target.sh maven/com/chaquo/python/target/3.12.12-0
@@ -103,12 +104,12 @@ jobs:
         run: |
           cd /tmp/jiter-${{ github.event.inputs.version }}
           if [ -f Cargo.toml ]; then
-            echo "=== Original Cargo.toml ==="
-            cat Cargo.toml
-            sed -i 's/^lto = true/lto = false/' Cargo.toml
-            sed -i 's/^codegen-units = 1/codegen-units = 16/' Cargo.toml
-            echo "=== Patched Cargo.toml ==="
-            cat Cargo.toml
+            echo "=== Original Cargo.toml (profile section) ==="
+            grep -A 5 '\[profile.release\]' Cargo.toml || true
+            sed -i 's/^lto = true/lto = false/' Cargo.toml || true
+            sed -i 's/^codegen-units = 1/codegen-units = 16/' Cargo.toml || true
+            echo "=== Patched Cargo.toml (profile section) ==="
+            grep -A 5 '\[profile.release\]' Cargo.toml || true
           else
             echo "Cargo.toml not found!"
             exit 1
@@ -128,7 +129,8 @@ jobs:
 
       - name: Build wheel
         env:
-          ANDROID_HOME: ${{ env.ANDROID_SDK_ROOT }}
+          ANDROID_HOME: /usr/local/lib/android/sdk
+          ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
