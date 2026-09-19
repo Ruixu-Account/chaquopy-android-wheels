@@ -75,7 +75,7 @@ jobs:
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;27.3.13750724" || true
           ls -la $ANDROID_HOME/ndk/ || true
 
-            - name: Patch Chaquopy build-wheel.py
+      - name: Patch Chaquopy build-wheel.py
         run: |
           python3 - <<'PY'
           p = "/opt/chaquopy/server/pypi/build-wheel.py"
@@ -105,7 +105,7 @@ jobs:
           grep -n "python_executable=" /opt/chaquopy/server/pypi/build-wheel.py
           echo "=== verify patch2 ==="
           grep -n "PYO3_CROSS_LIB_DIR" /opt/chaquopy/server/pypi/build-wheel.py
-
+          
       - name: Download Android Python target
         run: |
           cd /opt/chaquopy
