@@ -61,6 +61,35 @@ jobs:
         run: |
           pip install -r /opt/chaquopy/server/pypi/requirements.txt
 
+      - name: Patch Chaquopy build-wheel.py for maturin
+        run: |
+          python3 - <<'PY'
+          p = "/opt/chaquopy/server/pypi/build-wheel.py"
+          src = open(p).read()
+          old = '''self.builder = build.ProjectBuilder(
+                              self.src_dir, python_executable=f"{self.build_env}/bin/python")'''
+          # ↑ 缩进可能不同，用宽松匹配
+          import re
+          pattern = re.compile(
+              r'self\.builder = build\.ProjectBuilder\(\s*'
+              r'self\.src_dir, python_executable=f"\{self\.build_env\}/bin/python"\)'
+          )
+          if not pattern.search(src):
+              raise SystemExit("=== patch target not found ===")
+          replacement = (
+              'py_ver = self.python or ".".join(map(str, sys.version_info[:2]))\n'
+              '                py_exe = f"{self.build_env}/bin/python{py_ver}"\n'
+              '                if not exists(py_exe):\n'
+              '                    os.symlink(f"{self.build_env}/bin/python", py_exe)\n'
+              '                self.builder = build.ProjectBuilder(\n'
+              '                    self.src_dir, python_executable=py_exe)'
+          )
+          src = pattern.sub(replacement, src, count=1)
+          open(p, "w").write(src)
+          print("=== patched ok ===")
+          PY
+          grep -A 6 "py_ver = self.python" /opt/chaquopy/server/pypi/build-wheel.py
+          
       - name: Set Android env vars
         run: |
           echo "ANDROID_HOME=/usr/local/lib/android/sdk" >> $GITHUB_ENV
