@@ -33,7 +33,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python (host, 3.11 and 3.12)
+      - name: Setup Python (host)
         uses: actions/setup-python@v5
         with:
           python-version: |
@@ -81,14 +81,12 @@ jobs:
           p = "/opt/chaquopy/server/pypi/build-wheel.py"
           src = open(p).read()
 
-          # Patch 1
           old1 = 'python_executable=f"{self.build_env}/bin/python")'
           new1 = 'python_executable=f"{self.build_env}/bin/python{self.python}")'
           if old1 not in src:
               raise SystemExit("patch1 target not found")
           src = src.replace(old1, new1, 1)
 
-          # Patch 2: 单引号拼接，避免三引号跨行
           old2 = ('            "PYO3_CROSS_PYTHON_VERSION": self.python,\n'
                   '        })')
           new2 = ('            "PYO3_CROSS_PYTHON_VERSION": self.python,\n'
@@ -105,7 +103,7 @@ jobs:
           grep -n "python_executable=" /opt/chaquopy/server/pypi/build-wheel.py
           echo "=== verify patch2 ==="
           grep -n "PYO3_CROSS_LIB_DIR" /opt/chaquopy/server/pypi/build-wheel.py
-          
+
       - name: Download Android Python target
         run: |
           cd /opt/chaquopy
@@ -141,7 +139,6 @@ jobs:
           fi
           cp -a "/tmp/$PKG-$VER/." "$RECIPE_DIR/src/"
 
-          # 关闭 LTO，避免 Android linker 报错
           if [ -f "$RECIPE_DIR/src/Cargo.toml" ]; then
             sed -i 's/^lto = true/lto = false/' "$RECIPE_DIR/src/Cargo.toml" || true
             sed -i 's/^lto = "fat"/lto = false/' "$RECIPE_DIR/src/Cargo.toml" || true
@@ -183,7 +180,7 @@ jobs:
           echo "=== search sysconfigdata ==="
           find /tmp/recipe-${{ inputs.package }}/build -name "*sysconfigdata*" -o -name "*sysconfig*.py" 2>/dev/null || echo "(none)"
 
-                - name: Inject minimal sysconfigdata for maturin
+      - name: Inject minimal sysconfigdata for maturin
         run: |
           LIB=$(find /tmp/recipe-${{ inputs.package }}/build -type d -name lib -path "*chaquopy*" | head -1)
           echo "Injecting into: $LIB"
@@ -219,7 +216,7 @@ jobs:
           echo "=== injected ==="
           ls -la "$LIB"/_sysconfigdata*
           head -5 "$LIB"/_sysconfigdata*
-          
+
       - name: Build wheel
         run: |
           cd /opt/chaquopy/server/pypi
