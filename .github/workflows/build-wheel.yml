@@ -75,7 +75,7 @@ jobs:
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;27.3.13750724" || true
           ls -la $ANDROID_HOME/ndk/ || true
 
-            - name: Patch Chaquopy build-wheel.py
+      - name: Patch Chaquopy build-wheel.py
         run: |
           python3 - <<'PY'
           p = "/opt/chaquopy/server/pypi/build-wheel.py"
