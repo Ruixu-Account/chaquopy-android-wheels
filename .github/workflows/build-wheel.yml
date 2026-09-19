@@ -58,7 +58,24 @@ jobs:
         id: setup-ndk
         with:
           ndk-version: r26b
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
 
+      - name: Accept Android SDK licenses
+        run: yes | sdkmanager --licenses || true
+
+      - name: Install Android SDK components
+        run: |
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Set ANDROID_HOME
+        run: echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
+
+      - name: Verify Android SDK
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          ls -la $ANDROID_HOME
+          which sdkmanager
       - name: Clone Chaquopy ${{ github.event.inputs.python == '3.13' && '17.0.0' || '17.0.0' }}
         run: |
           git clone --depth 1 --branch 17.0.0 https://github.com/chaquo/chaquopy.git /opt/chaquopy
@@ -68,9 +85,11 @@ jobs:
           pip install -r /opt/chaquopy/server/pypi/requirements.txt
 
       - name: Download Android Python target
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_SDK_ROOT }}
         run: |
           cd /opt/chaquopy/server/pypi
-          ./target/download-target.sh maven/com/chaquo/python/target/${{ github.event.inputs.python }}.12-0
+          ./target/download-target.sh maven/com/chaquo/python/target/3.12.12-0
 
       - name: Download source distribution
         run: |
@@ -97,17 +116,18 @@ jobs:
             echo "No patch found for ${{ github.event.inputs.package }}, skipping."
           fi
 
-      - name: Build wheel
+           - name: Build wheel
         env:
           ANDROID_HOME: ${{ env.ANDROID_SDK_ROOT }}
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
           cd /opt/chaquopy/server/pypi
           ./build-wheel.py \
             --python ${{ github.event.inputs.python }} \
             --abi ${{ github.event.inputs.abi }} \
             /tmp/${{ github.event.inputs.package }}-${{ github.event.inputs.version }}
-
+            
       - name: List built wheels
         run: |
           ls -la /opt/chaquopy/server/pypi/dist/
