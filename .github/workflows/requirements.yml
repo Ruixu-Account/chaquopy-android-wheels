@@ -1,92 +1,169 @@
-name: Dump AstrBot deps
+name: Dump AstrBot Dependencies
 
 on:
   workflow_dispatch:
     inputs:
       astrbot_version:
-        description: 'AstrBot version (leave empty for latest)'
+        description: 'AstrBot 版本（留空=最新）'
         required: false
-        default: ''
+        default: '4.28.1'
       python:
-        description: 'Python version'
+        description: 'Python 版本'
         required: true
         default: '3.12'
         type: choice
         options:
           - '3.12'
-          - '3.11'
+          - '3.13'
 
 jobs:
   dump:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+    timeout-minutes: 30
 
-      - uses: actions/setup-python@v5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ inputs.python }}
 
-      - name: Install AstrBot
+      - name: Install AstrBot in clean venv
         run: |
           python -m venv /tmp/venv
-          /tmp/venv/bin/pip install --upgrade pip
+          /tmp/venv/bin/pip install --upgrade pip -q
           if [ -n "${{ inputs.astrbot_version }}" ]; then
-            /tmp/venv/bin/pip install "astrbot==${{ inputs.astrbot_version }}"
+            echo "装 AstrBot==${{ inputs.astrbot_version }}"
+            /tmp/venv/bin/pip install "astrbot==${{ inputs.astrbot_version }}" -q
           else
-            /tmp/venv/bin/pip install astrbot
+            echo "装 AstrBot 最新版"
+            /tmp/venv/bin/pip install astrbot -q
           fi
-      - name: Clone Chaquopy 17.0.0
-        run: |
-          git clone --depth 1 --branch 17.0.0 --recurse-submodules \
-            https://github.com/chaquo/chaquopy.git /opt/chaquopy
-          cd /opt/chaquopy
-          git submodule update --init --recursive || true
-          echo "=== /opt/chaquopy 顶层 ==="
-          ls -la /opt/chaquopy/
-          echo "=== server/pypi ==="
-          ls -la /opt/chaquopy/server/pypi/
-          echo "=== packages ==="
-          ls /opt/chaquopy/server/pypi/packages/ 2>&1 | head -50 || echo "packages missing"
-          ls /opt/chaquopy/server/pypi/packages/ | head -20
-          echo "---"
-          ls -d /opt/chaquopy/server/pypi/packages/{lxml,pillow,numpy,cffi} 2>&1
-      - name: Freeze
-        run: |
-          /tmp/venv/bin/pip freeze > requirements.txt
-          echo "=== requirements.txt ==="
-          cat requirements.txt
 
-      - name: Classify (pure python vs native)
+      - name: Freeze full dependency tree
         run: |
-          echo "=== 需要编译的包（Linux 下是 wheel 但 PyPI 上有 sdist 的）==="
-          while read line; do
+          /tmp/venv/bin/pip freeze > /tmp/full-freeze.txt
+          echo "=== 完整依赖树（$(grep -c . /tmp/full-freeze.txt) 个包）==="
+          cat /tmp/full-freeze.txt
+
+      - name: Classify dependencies
+        run: |
+          > /tmp/native-deps.txt       # 需要编译（有 sdist 无 pure wheel 无预构建）
+          > /tmp/prebuilt-deps.txt     # chaquo.com 有预构建
+          > /tmp/pure-deps.txt         # 纯 Python
+          > /tmp/chaquo-versions.txt   # chaquo.com 版本映射（用于替换）
+
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
             pkg=$(echo "$line" | cut -d= -f1)
             ver=$(echo "$line" | cut -d= -f3)
-            json=$(curl -s "https://pypi.org/pypi/$pkg/$ver/json")
-            has_sdist=$(echo "$json" | jq -r '[.urls[] | select(.packagetype=="sdist")] | length')
-            has_native=$(echo "$json" | jq -r '[.urls[] | select(.packagetype=="bdist_wheel" and (.filename | test("cp312.*(manylinux|musllinux)")))] | length')
-            if [ "$has_native" != "0" ]; then
-              echo "🔥 $line"
-            fi
-          done < requirements.txt
-          
-      - name: List Chaquopy built-in recipes
-        run: |
-          echo "=== 官方 recipe 列表 ==="
-          ls /opt/chaquopy/server/pypi/packages/ | sort
-          echo ""
-          echo "=== 我们要找的 ==="
-          for p in lxml pillow numpy pandas libxml2 libxslt libjpeg libpng freetype zlib libffi openssl cffi; do
-            if [ -d "/opt/chaquopy/server/pypi/packages/$p" ]; then
-              echo "✅ $p"
-            else
-              echo "❌ $p"
-            fi
-          done
+            [ -z "$ver" ] && continue
 
-      - name: Upload
+            # 跳过 astrbot 本体和 pip/setuptools/wheel
+            case "$pkg" in
+              astrbot|pip|setuptools|wheel) continue ;;
+            esac
+
+            pkg_lower=$(echo "$pkg" | tr '[:upper:]' '[:lower:]')
+
+            # 1. 先查 chaquo.com 有没有预构建
+            chaquo_html=$(curl -s "https://chaquo.com/pypi-13.1/$pkg_lower/" 2>/dev/null || echo "")
+            chaquo_hit=$(echo "$chaquo_html" \
+              | grep -oE '[a-zA-Z0-9_.-]+-cp312-cp312-android_(21|24)_arm64_v8a\.whl' \
+              | head -1)
+
+            if [ -n "$chaquo_hit" ]; then
+              chaquo_ver=$(echo "$chaquo_hit" \
+                | sed -E "s/^[a-zA-Z0-9_.]+-([0-9][^-]*)-.*/\1/")
+              echo "$pkg==$chaquo_ver" >> /tmp/prebuilt-deps.txt
+              echo "$pkg==$chaquo_ver  (freeze: $ver)" >> /tmp/chaquo-versions.txt
+              continue
+            fi
+
+            # 2. 查 PyPI：有 sdist 且没有 py3-none-any
+            json=$(curl -s "https://pypi.org/pypi/$pkg/$ver/json")
+            has_sdist=$(echo "$json" | jq -r '[.urls[] | select(.packagetype=="sdist")] | length' 2>/dev/null || echo 0)
+            has_pure=$(echo "$json" | jq -r '[.urls[] | select(.filename | test("py3-none-any"))] | length' 2>/dev/null || echo 0)
+
+            if [ "$has_sdist" != "0" ] && [ "$has_pure" = "0" ]; then
+              echo "$line" >> /tmp/native-deps.txt
+            else
+              echo "$line" >> /tmp/pure-deps.txt
+            fi
+          done < /tmp/full-freeze.txt
+
+          echo ""
+          echo "════════════════════════════════════════"
+          echo "分类结果"
+          echo "════════════════════════════════════════"
+          echo ""
+          echo "📦 chaquo.com 有预构建（$(grep -c . /tmp/prebuilt-deps.txt) 个）:"
+          cat /tmp/prebuilt-deps.txt
+          echo ""
+          echo "🔧 需要自己编译（$(grep -c . /tmp/native-deps.txt) 个）:"
+          cat /tmp/native-deps.txt
+          echo ""
+          echo "🐍 纯 Python，不用编（$(grep -c . /tmp/pure-deps.txt) 个）:"
+          cat /tmp/pure-deps.txt
+          echo ""
+          echo "📊 版本替换详情（freeze 版本 → chaquo.com 版本）:"
+          cat /tmp/chaquo-versions.txt
+
+      - name: Generate Gradle install block
+        run: |
+          echo ""
+          echo "════════════════════════════════════════"
+          echo "【1】Gradle install 块（纯 Python + 预构建，直接粘贴到 pip {}）"
+          echo "════════════════════════════════════════"
+          cat /tmp/pure-deps.txt /tmp/prebuilt-deps.txt \
+            | grep -v '^$' \
+            | sort -u \
+            | while IFS= read -r line; do
+                pkg=$(echo "$line" | cut -d= -f1)
+                ver=$(echo "$line" | cut -d= -f3)
+                if [ -n "$ver" ]; then
+                  echo "install \"$pkg==$ver\""
+                else
+                  echo "install \"$pkg\""
+                fi
+              done
+
+      - name: Generate batch build input
+        run: |
+          echo ""
+          echo "════════════════════════════════════════"
+          echo "【2】批量构建输入（复制到 Build Android Wheel 的 packages 框）"
+          echo "════════════════════════════════════════"
+          echo ""
+          grep -v '^$' /tmp/native-deps.txt | tr '\n' ',' | sed 's/,$/\n/'
+          echo ""
+
+      - name: Generate full package list
+        run: |
+          echo ""
+          echo "════════════════════════════════════════"
+          echo "【3】全部依赖一览（用于对照）"
+          echo "════════════════════════════════════════"
+          echo ""
+          echo "预构建:"
+          cat /tmp/prebuilt-deps.txt
+          echo ""
+          echo "需要编译:"
+          cat /tmp/native-deps.txt
+          echo ""
+          echo "纯 Python:"
+          cat /tmp/pure-deps.txt
+
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: astrbot-requirements-${{ inputs.python }}
-          path: requirements.txt
+          name: astrbot-deps-${{ inputs.astrbot_version || 'latest' }}
+          path: |
+            /tmp/full-freeze.txt
+            /tmp/native-deps.txt
+            /tmp/prebuilt-deps.txt
+            /tmp/pure-deps.txt
+            /tmp/chaquo-versions.txt
           retention-days: 30
