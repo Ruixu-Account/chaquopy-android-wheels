@@ -150,8 +150,6 @@ jobs:
           source: pypi
           build:
             number: 0
-            script_env:
-              - MESON_ARGS=--cross-file=/opt/chaquopy/server/pypi/packages/astrbot-numpy/android-arm64.ini
           requirements:
             build:
               - meson-python 0.18.0
@@ -163,7 +161,7 @@ jobs:
               - chaquopy-openblas 0.2.20
           EOF
 
-          cat > "$RECIPE/android-arm64.ini" <<'EOF'
+          cat > /tmp/android-arm64.ini <<'EOF'
           [binaries]
           c = '/usr/local/lib/android/sdk/ndk/27.3.13750724/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang'
           cpp = '/usr/local/lib/android/sdk/ndk/27.3.13750724/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++'
@@ -171,7 +169,6 @@ jobs:
           strip = '/usr/local/lib/android/sdk/ndk/27.3.13750724/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip'
           ld = '/usr/local/lib/android/sdk/ndk/27.3.13750724/toolchains/llvm/prebuilt/linux-x86_64/bin/ld.lld'
           ranlib = '/usr/local/lib/android/sdk/ndk/27.3.13750724/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ranlib'
-          python = '/opt/hostedtoolcache/Python/3.12.14/x64/bin/python3.12'
 
           [host_machine]
           system = 'android'
@@ -187,11 +184,10 @@ jobs:
           cpp_args = ['-D__BIONIC_NO_PAGE_SIZE_MACRO']
           EOF
 
-          echo "=== recipe ==="
+          echo "=== meta.yaml ==="
           cat "$RECIPE/meta.yaml"
-          echo ""
           echo "=== cross file ==="
-          cat "$RECIPE/android-arm64.ini"
+          cat /tmp/android-arm64.ini
 
       - name: Build numpy
         run: |
