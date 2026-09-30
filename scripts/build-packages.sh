@@ -66,8 +66,8 @@ build:
 requirements:
   build:
     - cmake 3.24.0
-    - setuptools
-    - wheel
+    - setuptools 69.0.2
+    - wheel 0.42.0
     - numpy 1.26.2
   host:
     - python
