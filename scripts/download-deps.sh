@@ -24,7 +24,6 @@ PREBUILT=(
   "lxml/lxml-5.3.0-0-cp312-cp312-android_24_arm64_v8a.whl"
   "cryptography/cryptography-42.0.8-0-cp312-cp312-android_24_arm64_v8a.whl"
   "pandas/pandas-2.1.3-0-cp312-cp312-android_21_arm64_v8a.whl"
-  "numpy/numpy-1.26.2-0-cp312-cp312-android_24_arm64_v8a.whl"
 )
 
 download_one() {
@@ -58,6 +57,34 @@ echo ""
 echo "=== 下载预构建 ==="
 for item in "${PREBUILT[@]}"; do
   download_one "$item" "预构建" || exit 1
+done
+
+# ===== 自己的 Release 包（供 faiss/pandas 等编译依赖）=====
+OWN_RELEASES=(
+  "numpy/numpy-1.26.2-0-cp312-cp312-android_24_arm64_v8a.whl"
+)
+
+OWN_BASE="https://github.com/Ruixu-Account/chaquopy-android-wheels/releases/download/latest"
+
+echo ""
+echo "=== 下载自有 Release 包 ==="
+for item in "${OWN_RELEASES[@]}"; do
+  pkg_dir=$(dirname "$item")
+  file=$(basename "$item")
+  target_dir="$DIST_DIR/$pkg_dir"
+  mkdir -p "$target_dir"
+
+  if [ -f "$target_dir/$file" ]; then
+    echo "✅ 已存在: $pkg_dir/$file"
+    continue
+  fi
+
+  url="$OWN_BASE/$file"
+  echo "⬇️  $url"
+  wget -q --tries=3 --timeout=60 "$url" -O "$target_dir/$file" || {
+    echo "❌ 下载失败: $url"
+    exit 1
+  }
 done
 
 echo ""
