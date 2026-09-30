@@ -46,6 +46,53 @@ build_one() {
     local PKG_LOWER
     PKG_LOWER=$(echo "$PKG" | tr '[:upper:]' '[:lower:]')
 
+        # ============ faiss 专用 ============
+    if [ "$PKG_LOWER" = "faiss-cpu" ] || [ "$PKG_LOWER" = "faiss" ]; then
+        echo "🔧 faiss 专用构建流程"
+        rm -rf "$RECIPE_DIR"
+        mkdir -p "$RECIPE_DIR"
+
+        cat > "$RECIPE_DIR/meta.yaml" <<EOF
+package:
+  name: faiss-cpu
+  version: "$VER"
+source: pypi
+build:
+  number: 0
+  script_env:
+    - CMAKE_ARGS=-DFAISS_ENABLE_GPU=OFF -DFAISS_ENABLE_PYTHON=ON -DFAISS_OPT_LEVEL=generic -DBUILD_TESTING=OFF -DCMAKE_BUILD_PARALLEL_LEVEL=1
+requirements:
+  build:
+    - cmake 3.24.0
+    - setuptools
+    - wheel
+    - numpy 1.26.2
+  host:
+    - python
+    - numpy 1.26.2
+    - chaquopy-openblas 0.2.20
+  run:
+    - numpy
+EOF
+
+        if ! (
+            cd "$PYPI_DIR"
+            CARGO_BUILD_JOBS=1 python build-wheel.py \
+                --python "$PYTHON_VER" \
+                --abi arm64-v8a \
+                "$RECIPE_DIR" > /tmp/build-faiss.log 2>&1
+        ); then
+            echo "❌ faiss 构建失败，最后 80 行："
+            tail -80 /tmp/build-faiss.log
+            return 1
+        fi
+
+        [ -d "$PYPI_DIR/dist/faiss-cpu" ] && \
+            find "$PYPI_DIR/dist/faiss-cpu" -name "*android_*.whl" \
+                -exec cp -f {} "$WHEELS_DIR/" \;
+        return 0
+    fi
+    # ============ faiss 结束 ============
     # ============ 预构建 wheel 优先 ============
     local PREBUILT_DIR="$PYPI_DIR/dist/$PKG_LOWER"
     if [ -d "$PREBUILT_DIR" ]; then
