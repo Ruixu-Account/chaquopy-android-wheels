@@ -71,8 +71,6 @@ requirements:
     - python
     - numpy 1.26.2
     - chaquopy-openblas 0.2.20
-  run:
-    - numpy
 EOF
 
         if ! (
