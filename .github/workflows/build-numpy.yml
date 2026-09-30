@@ -1,0 +1,236 @@
+name: Build numpy 2.x for Android
+
+on:
+  workflow_dispatch:
+    inputs:
+      numpy_version:
+        description: 'numpy 版本（如 2.5.3）'
+        required: true
+        default: '2.5.3'
+      python:
+        description: 'Python 版本'
+        required: true
+        default: '3.12'
+        type: choice
+        options:
+          - '3.12'
+      python_target_version:
+        description: 'Chaquopy Python target 版本'
+        required: true
+        default: '3.12.12-0'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python (host)
+        uses: actions/setup-python@v5
+        with:
+          python-version: |
+            3.12
+            3.11
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget unzip patchelf jq zip ninja-build
+
+      - name: Clone Chaquopy 17.0.0
+        run: |
+          git clone --depth 1 --branch 17.0.0 --recurse-submodules \
+            https://github.com/chaquo/chaquopy.git /opt/chaquopy
+          cd /opt/chaquopy
+          git submodule update --init --recursive || true
+
+      - name: Install Chaquopy build requirements
+        run: |
+          pip install -r /opt/chaquopy/server/pypi/requirements.txt
+
+      - name: Set Android env vars
+        run: |
+          echo "ANDROID_HOME=/usr/local/lib/android/sdk" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=/usr/local/lib/android/sdk" >> $GITHUB_ENV
+          echo "ANDROID_NDK_HOME=/usr/local/lib/android/sdk/ndk/27.3.13750724" >> $GITHUB_ENV
+
+      - name: Pre-install NDK r27c
+        continue-on-error: true
+        run: |
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;27.3.13750724" || true
+
+      - name: Patch Chaquopy build-wheel.py
+        run: |
+          python3 - <<'PY'
+          import re
+          p = "/opt/chaquopy/server/pypi/build-wheel.py"
+          src = open(p).read()
+
+          old1 = 'python_executable=f"{self.build_env}/bin/python")'
+          new1 = 'python_executable=f"{self.build_env}/bin/python{self.python}")'
+          if old1 not in src:
+              raise SystemExit("patch1 not found")
+          src = src.replace(old1, new1, 1)
+
+          old2 = ('            "PYO3_CROSS_PYTHON_VERSION": self.python,\n'
+                  '        })')
+          new2 = ('            "PYO3_CROSS_PYTHON_VERSION": self.python,\n'
+                  '            "PYO3_CROSS_LIB_DIR": f"{self.host_env}/chaquopy/lib",\n'
+                  '        })')
+          if old2 not in src:
+              raise SystemExit("patch2 not found")
+          src = src.replace(old2, new2, 1)
+
+          open(p, "w").write(src)
+          print("patches ok")
+          PY
+
+      - name: Download Android Python target
+        run: |
+          cd /opt/chaquopy
+          ./target/download-target.sh \
+            maven/com/chaquo/python/target/${{ inputs.python_target_version }}
+          find /opt/chaquopy/maven -name "*.zip" -exec ls -la {} \;
+
+      - name: Inject sysconfigdata
+        run: |
+          ZIP="/opt/chaquopy/maven/com/chaquo/python/target/${{ inputs.python_target_version }}/target-${{ inputs.python_target_version }}-arm64-v8a.zip"
+          PY_VER="${{ inputs.python }}"
+          PY_VER_NODOT="${PY_VER//./}"
+          INJ=/tmp/inject_sysconfig
+          rm -rf "$INJ"
+          mkdir -p "$INJ/jniLibs/arm64-v8a"
+          cat > "$INJ/jniLibs/arm64-v8a/_sysconfigdata__linux_aarch64-linux-android.py" <<EOF
+          build_time_vars = {
+              "SOABI": "cpython-${PY_VER_NODOT}-aarch64-linux-android",
+              "EXT_SUFFIX": ".cpython-${PY_VER_NODOT}-aarch64-linux-android.so",
+              "VERSION": "${PY_VER}",
+              "LDVERSION": "${PY_VER}",
+              "py_version_nodot": "${PY_VER_NODOT}",
+              "py_version_short": "${PY_VER}",
+              "Py_ENABLE_SHARED": 1,
+              "Py_DEBUG": 0,
+              "Py_REF_DEBUG": 0,
+              "abiflags": "",
+              "prefix": "/data/data/com.astrbot.app/files/astrbot_root",
+              "exec_prefix": "/data/data/com.astrbot.app/files/astrbot_root",
+              "CC": "aarch64-linux-android24-clang",
+              "CXX": "aarch64-linux-android24-clang++",
+              "LDSHARED": "aarch64-linux-android24-clang -shared",
+          }
+          EOF
+          cd "$INJ"
+          zip "$ZIP" jniLibs/arm64-v8a/_sysconfigdata__linux_aarch64-linux-android.py
+          unzip -l "$ZIP" | grep sysconfigdata
+
+      - name: Download openblas
+        run: |
+          DIST_DIR="/opt/chaquopy/server/pypi/dist"
+          mkdir -p "$DIST_DIR/chaquopy-openblas"
+          wget -q "https://chaquo.com/pypi-13.1/chaquopy-openblas/chaquopy_openblas-0.2.20-5-py3-none-android_21_arm64_v8a.whl" \
+            -O "$DIST_DIR/chaquopy-openblas/chaquopy_openblas-0.2.20-5-py3-none-android_21_arm64_v8a.whl"
+          ls -la "$DIST_DIR/chaquopy-openblas/"
+
+      - name: Prepare numpy recipe
+        run: |
+          RECIPE="/opt/chaquopy/server/pypi/packages/astrbot-numpy"
+          rm -rf "$RECIPE"
+          mkdir -p "$RECIPE"
+
+          cat > "$RECIPE/meta.yaml" <<'EOF'
+          package:
+            name: numpy
+            version: "${{ inputs.numpy_version }}"
+          source: pypi
+          build:
+            number: 0
+            script_env:
+              - MESON_ARGS=--cross-file=/opt/chaquopy/server/pypi/packages/astrbot-numpy/android-arm64.ini
+          requirements:
+            build:
+              - meson-python 0.18.0
+              - cython 3.0.6
+              - ninja 1.11.1
+              - pkgconfig 1.5.5
+            host:
+              - python
+              - chaquopy-openblas 0.2.20
+          EOF
+
+          cat > "$RECIPE/android-arm64.ini" <<'EOF'
+          [binaries]
+          c = '/usr/local/lib/android/sdk/ndk/27.3.13750724/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang'
+          cpp = '/usr/local/lib/android/sdk/ndk/27.3.13750724/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++'
+          ar = '/usr/local/lib/android/sdk/ndk/27.3.13750724/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar'
+          strip = '/usr/local/lib/android/sdk/ndk/27.3.13750724/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip'
+          ld = '/usr/local/lib/android/sdk/ndk/27.3.13750724/toolchains/llvm/prebuilt/linux-x86_64/bin/ld.lld'
+          ranlib = '/usr/local/lib/android/sdk/ndk/27.3.13750724/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ranlib'
+          python = '/opt/hostedtoolcache/Python/3.12.14/x64/bin/python3.12'
+
+          [host_machine]
+          system = 'android'
+          cpu_family = 'aarch64'
+          cpu = 'aarch64'
+          endian = 'little'
+
+          [properties]
+          longdouble_format = 'IEEE_QUAD_LE'
+
+          [built-in options]
+          c_args = ['-D__BIONIC_NO_PAGE_SIZE_MACRO']
+          cpp_args = ['-D__BIONIC_NO_PAGE_SIZE_MACRO']
+          EOF
+
+          echo "=== recipe ==="
+          cat "$RECIPE/meta.yaml"
+          echo ""
+          echo "=== cross file ==="
+          cat "$RECIPE/android-arm64.ini"
+
+      - name: Build numpy
+        run: |
+          cd /opt/chaquopy/server/pypi
+          CARGO_BUILD_JOBS=1 python build-wheel.py \
+            --python ${{ inputs.python }} \
+            --abi arm64-v8a \
+            /opt/chaquopy/server/pypi/packages/astrbot-numpy 2>&1 | tee /tmp/build-numpy.log
+          echo "=== last 60 lines ==="
+          tail -60 /tmp/build-numpy.log
+
+      - name: List built wheels
+        if: always()
+        run: |
+          find /opt/chaquopy/server/pypi/dist/numpy -name "*.whl" -exec ls -la {} \; || true
+
+      - name: Collect android wheel
+        if: success()
+        run: |
+          mkdir -p /tmp/all-wheels
+          find /opt/chaquopy/server/pypi/dist/numpy -name "*android_*.whl" \
+            -exec cp -f {} /tmp/all-wheels/ \;
+          ls -la /tmp/all-wheels/
+
+      - name: Upload artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: numpy-${{ inputs.numpy_version }}-android
+          path: /tmp/all-wheels/*.whl
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Upload to Release
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          files: /tmp/all-wheels/*.whl
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
