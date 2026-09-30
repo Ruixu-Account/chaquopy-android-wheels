@@ -56,7 +56,9 @@ build_one() {
 package:
   name: faiss-cpu
   version: "$VER"
-source: pypi
+source:
+  git_url: https://github.com/facebookresearch/faiss
+  git_rev: v$VER
 build:
   number: 0
   script_env:
