@@ -71,14 +71,12 @@ jobs:
           p = "/opt/chaquopy/server/pypi/build-wheel.py"
           src = open(p).read()
 
-          # Patch 1: maturin 从文件名解析 Python 版本
           old1 = 'python_executable=f"{self.build_env}/bin/python")'
           new1 = 'python_executable=f"{self.build_env}/bin/python{self.python}")'
           if old1 not in src:
               raise SystemExit("patch1 not found")
           src = src.replace(old1, new1, 1)
 
-          # Patch 2: pyo3 交叉编译
           old2 = ('            "PYO3_CROSS_PYTHON_VERSION": self.python,\n'
                   '        })')
           new2 = ('            "PYO3_CROSS_PYTHON_VERSION": self.python,\n'
@@ -88,7 +86,6 @@ jobs:
               raise SystemExit("patch2 not found")
           src = src.replace(old2, new2, 1)
 
-          # Patch 3: 给 scikit-build-core 传 CMake 参数
           old3 = '            return self.builder.build("wheel", "dist")'
           new3 = ('            return self.builder.build(\n'
                   '                "wheel", "dist",\n'
@@ -149,23 +146,53 @@ jobs:
         run: |
           DIST_DIR="/opt/chaquopy/server/pypi/dist"
 
-          # numpy 2.5.3
           mkdir -p "$DIST_DIR/numpy"
           wget -q "https://github.com/Ruixu-Account/chaquopy-android-wheels/releases/download/latest/numpy-2.5.3-0-cp312-cp312-android_24_arm64_v8a.whl" \
             -O "$DIST_DIR/numpy/numpy-2.5.3-0-cp312-cp312-android_24_arm64_v8a.whl"
 
-          # chaquopy-openblas
           mkdir -p "$DIST_DIR/chaquopy-openblas"
           wget -q "https://chaquo.com/pypi-13.1/chaquopy-openblas/chaquopy_openblas-0.2.20-5-py3-none-android_21_arm64_v8a.whl" \
             -O "$DIST_DIR/chaquopy-openblas/chaquopy_openblas-0.2.20-5-py3-none-android_21_arm64_v8a.whl"
 
-          # chaquopy-libcxx
           mkdir -p "$DIST_DIR/chaquopy-libcxx"
           wget -q "https://chaquo.com/pypi-13.1/chaquopy-libcxx/chaquopy_libcxx-180000-0-py3-none-android_24_arm64_v8a.whl" \
             -O "$DIST_DIR/chaquopy-libcxx/chaquopy_libcxx-180000-0-py3-none-android_24_arm64_v8a.whl"
 
           echo "=== dist 目录 ==="
           find "$DIST_DIR" -name "*.whl" -exec ls -la {} \;
+
+      - name: Clone and patch faiss source
+        run: |
+          cd /tmp
+          rm -rf faiss-src
+          git clone --depth 1 --branch v${{ inputs.faiss_version }} \
+            --recurse-submodules https://github.com/facebookresearch/faiss faiss-src
+          cd faiss-src
+
+          echo "=== original license line ==="
+          grep -n "^license" pyproject.toml || echo "(none)"
+
+          python3 - <<'PY'
+          import re
+          path = "pyproject.toml"
+          with open(path) as f:
+              content = f.read()
+          new_content = re.sub(
+              r'^license = "([^"]+)"',
+              r'license = {text = "\1"}',
+              content,
+              flags=re.MULTILINE
+          )
+          if new_content == content:
+              print("WARN: no license line changed")
+          else:
+              print("OK: license line patched")
+          with open(path, "w") as f:
+              f.write(new_content)
+          PY
+
+          echo "=== patched license line ==="
+          grep -n "^license" pyproject.toml
 
       - name: Prepare faiss recipe
         run: |
@@ -178,8 +205,7 @@ jobs:
             name: faiss-cpu
             version: "${{ inputs.faiss_version }}"
           source:
-            git_url: https://github.com/facebookresearch/faiss
-            git_rev: v${{ inputs.faiss_version }}
+            path: /tmp/faiss-src
           build:
             number: 0
           requirements:
