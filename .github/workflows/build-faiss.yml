@@ -90,7 +90,11 @@ jobs:
           new3 = ('            return self.builder.build(\n'
                   '                "wheel", "dist",\n'
                   '                config_settings={\n'
-                  '                    "cmake.args": "-DFAISS_ENABLE_GPU=OFF -DFAISS_ENABLE_PYTHON=ON -DFAISS_OPT_LEVEL=generic -DBUILD_TESTING=OFF -DBLA_VENDOR=OpenBLAS",\n'
+                  '                    "cmake.define.FAISS_ENABLE_GPU": "OFF",\n'
+                  '                    "cmake.define.FAISS_ENABLE_PYTHON": "ON",\n'
+                  '                    "cmake.define.FAISS_OPT_LEVEL": "generic",\n'
+                  '                    "cmake.define.BUILD_TESTING": "OFF",\n'
+                  '                    "cmake.define.BLA_VENDOR": "OpenBLAS",\n'
                   '                }\n'
                   '            )')
           if old3 not in src:
@@ -102,7 +106,7 @@ jobs:
           PY
           grep -n "python_executable=" /opt/chaquopy/server/pypi/build-wheel.py
           grep -n "PYO3_CROSS_LIB_DIR" /opt/chaquopy/server/pypi/build-wheel.py
-          grep -n "cmake.args" /opt/chaquopy/server/pypi/build-wheel.py
+          grep -n "cmake.define.FAISS_ENABLE_GPU" /opt/chaquopy/server/pypi/build-wheel.py
 
       - name: Download Android Python target
         run: |
