@@ -86,7 +86,7 @@ jobs:
               raise SystemExit("patch2 not found")
           src = src.replace(old2, new2, 1)
 
-                    old3 = '            return self.builder.build("wheel", "dist")'
+          old3 = '            return self.builder.build("wheel", "dist")'
           new3 = ('            numpy_include = f"{self.host_env}/numpy/_core/include"\n'
                   '            py_include = f"{self.host_env}/chaquopy/include/python{self.python}"\n'
                   '            py_lib = f"{self.host_env}/chaquopy/lib/libpython{self.python}.so"\n'
