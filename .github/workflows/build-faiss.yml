@@ -87,13 +87,8 @@ jobs:
           src = src.replace(old2, new2, 1)
 
           old3 = '            return self.builder.build("wheel", "dist")'
-          new3 = ('            numpy_include = f"{self.host_env}/numpy/_core/include"\n'
-                  '            py_include = f"{self.host_env}/chaquopy/include/python{self.python}"\n'
+          new3 = ('            py_include = f"{self.host_env}/chaquopy/include/python{self.python}"\n'
                   '            py_lib = f"{self.host_env}/chaquopy/lib/libpython{self.python}.so"\n'
-                  '            print(f"=== faiss python paths ===")\n'
-                  '            print(f"  numpy_include = {numpy_include}")\n'
-                  '            print(f"  py_include    = {py_include}")\n'
-                  '            print(f"  py_lib        = {py_lib}")\n'
                   '            return self.builder.build(\n'
                   '                "wheel", "dist",\n'
                   '                config_settings={\n'
@@ -103,9 +98,8 @@ jobs:
                   '                    "cmake.define.BUILD_TESTING": "OFF",\n'
                   '                    "cmake.define.BLA_VENDOR": "OpenBLAS",\n'
                   '                    "cmake.define.Python_EXECUTABLE": "/opt/hostedtoolcache/Python/3.12.14/x64/bin/python3.12",\n'
-                  '                    "cmake.define.Python_INCLUDE_DIRS": py_include,\n'
-                  '                    "cmake.define.Python_LIBRARIES": py_lib,\n'
-                  '                    "cmake.define.Python_NumPy_INCLUDE_DIRS": numpy_include,\n'
+                  '                    "cmake.define.Python_INCLUDE_DIR": py_include,\n'
+                  '                    "cmake.define.Python_LIBRARY": py_lib,\n'
                   '                }\n'
                   '            )')
           if old3 not in src:
@@ -208,6 +202,36 @@ jobs:
 
           echo "=== patched license line ==="
           grep -n "^license" pyproject.toml
+
+          echo "=== patch faiss/python/CMakeLists.txt ==="
+          python3 - <<'PY'
+          import re
+          path = "faiss/python/CMakeLists.txt"
+          with open(path) as f:
+              content = f.read()
+
+          pattern = re.compile(r'find_package\s*\(\s*Python[^)]*\)')
+          m = pattern.search(content)
+          if not m:
+              print("WARN: no find_package(Python) line found")
+          else:
+              actual = m.group(0)
+              print(f"Found: {actual}")
+              replacement = (
+                  'find_package(Python REQUIRED COMPONENTS Development.Module)\n'
+                  'set(Python_NumPy_INCLUDE_DIRS "$ENV{PREFIX}/../numpy/_core/include")\n'
+                  'message(STATUS "Chaquopy: forced Python_NumPy_INCLUDE_DIRS = ${Python_NumPy_INCLUDE_DIRS}")'
+              )
+              new_content = content.replace(actual, replacement, 1)
+              with open(path, "w") as f:
+                  f.write(new_content)
+              print("OK: patched")
+              # 打印修改后的相关行
+              with open(path) as f:
+                  for i, line in enumerate(f, 1):
+                      if "find_package(Python" in line or "Python_NumPy_INCLUDE_DIRS" in line:
+                          print(f"  {i}: {line.rstrip()}")
+          PY
 
       - name: Prepare faiss recipe
         run: |
