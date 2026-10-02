@@ -178,7 +178,6 @@ jobs:
             --recurse-submodules https://github.com/facebookresearch/faiss faiss-src
           cd faiss-src
 
-          # 打 license patch
           echo "=== original license line ==="
           grep -n "^license" pyproject.toml || echo "(none)"
 
@@ -202,7 +201,6 @@ jobs:
           PY
           grep -n "^license" pyproject.toml
 
-          # 打 CMakeLists.txt patch
           echo "=== BEFORE: find_package(Python) ==="
           grep -n "find_package(Python\|Python_NumPy" faiss/python/CMakeLists.txt || echo "(not found)"
 
@@ -212,8 +210,6 @@ jobs:
           with open(path) as f:
               content = f.read()
 
-          # 匹配整个 find_package(...) 语句（可能跨行）
-          # 有 3 个连续 find_package(Python...) 都是问题点
           pattern = re.compile(
               r'find_package\s*\(\s*Python\b[^)]*\)',
               re.MULTILINE | re.DOTALL
@@ -228,13 +224,21 @@ jobs:
 
           replacement = (
               'find_package(Python REQUIRED COMPONENTS Development.Module)\n'
-              'file(GLOB _py_inc_dirs "${Python_INCLUDE_DIRS}")\n'
-              '# 从 Python_INCLUDE_DIR 推算 <host_env>/chaquopy/, 再推出 numpy 路径\n'
-              'get_filename_component(_py_base "${Python_INCLUDE_DIRS}" DIRECTORY)\n'
-              'get_filename_component(_host_env "${_py_base}" DIRECTORY)\n'
+              'get_filename_component(_py_inc_parent "${Python_INCLUDE_DIRS}" DIRECTORY)\n'
+              'get_filename_component(_py_chaquopy "${_py_inc_parent}" DIRECTORY)\n'
+              'get_filename_component(_host_env "${_py_chaquopy}" DIRECTORY)\n'
               'set(Python_NumPy_INCLUDE_DIRS "${_host_env}/numpy/_core/include")\n'
               'message(STATUS "Chaquopy: Python_INCLUDE_DIRS = ${Python_INCLUDE_DIRS}")\n'
-              'message(STATUS "Chaquopy: Python_NumPy_INCLUDE_DIRS = ${Python_NumPy_INCLUDE_DIRS}")'
+              'message(STATUS "Chaquopy: Python_NumPy_INCLUDE_DIRS = ${Python_NumPy_INCLUDE_DIRS}")\n'
+              'if(NOT EXISTS "${Python_NumPy_INCLUDE_DIRS}")\n'
+              '  message(FATAL_ERROR "Chaquopy: numpy include dir does not exist: ${Python_NumPy_INCLUDE_DIRS}")\n'
+              'endif()\n'
+              'if(NOT TARGET Python::NumPy)\n'
+              '  add_library(Python::NumPy INTERFACE IMPORTED)\n'
+              '  set_target_properties(Python::NumPy PROPERTIES\n'
+              '    INTERFACE_INCLUDE_DIRECTORIES "${Python_NumPy_INCLUDE_DIRS}")\n'
+              '  message(STATUS "Chaquopy: created fake Python::NumPy target")\n'
+              'endif()'
           )
 
           for m in matches:
@@ -246,8 +250,8 @@ jobs:
           PY
 
           echo "=== AFTER: find_package(Python) ==="
-          grep -n "find_package(Python\|Python_NumPy_INCLUDE_DIRS" faiss/python/CMakeLists.txt || echo "(not found)"
-          
+          grep -n "find_package(Python\|Python_NumPy_INCLUDE_DIRS\|Python::NumPy" faiss/python/CMakeLists.txt || echo "(not found)"
+
       - name: Prepare faiss recipe
         run: |
           RECIPE="/opt/chaquopy/server/pypi/packages/astrbot-faiss-cpu"
