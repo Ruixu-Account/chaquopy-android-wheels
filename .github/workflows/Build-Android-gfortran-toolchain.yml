@@ -88,8 +88,6 @@ jobs:
 
       # ============================================================
       # 修复 2：物理删除 availability 调用点（保留 #define 行）
-      #   - pattern 加 [A-Z_]* 覆盖 _NO_GUARD_FOR_NDK 等后缀变体
-      #   - 删除 bits/ioctl.h 里 clang 特有的 __overloadable 重载声明
       # ============================================================
       - name: Strip NDK availability annotations for GCC
         run: |
@@ -120,18 +118,6 @@ jobs:
           echo ""
           echo "=== 调用点数量（after）==="
           grep -rE "__INTRODUCED_IN|__DEPRECATED_IN|__REMOVED_IN" "$INCLUDE_DIR" 2>/dev/null | wc -l || true
-
-          echo ""
-          echo "=== 验证 1：api-level.h:192-196 ==="
-          sed -n '192,196p' "$INCLUDE_DIR/android/api-level.h"
-
-          echo ""
-          echo "=== 验证 2：stdlib.h:200-206 ==="
-          sed -n '200,206p' "$INCLUDE_DIR/stdlib.h"
-
-          echo ""
-          echo "=== 验证 3：versioning.h:53-62 ==="
-          sed -n '53,62p' "$INCLUDE_DIR/android/versioning.h"
 
       # ============================================================
       # 兜底 predef header
@@ -239,6 +225,9 @@ jobs:
           tar -xf gcc.tar.xz
           rm -f gcc.tar.xz
 
+      # ============================================================
+      # ★ 工具 wrappers（含 target 前缀别名，修复 r23+ NDK 缺工具名）
+      # ============================================================
       - name: Create tool wrappers
         run: |
           set -euo pipefail
@@ -282,11 +271,23 @@ jobs:
           EOF
           chmod +x "$WRAP/gcc"
 
+          # 通用工具（无前缀）
           ln -sf "${NDK_BIN}/llvm-ar"      "$WRAP/ar"
           ln -sf "${NDK_BIN}/llvm-ranlib"  "$WRAP/ranlib"
           ln -sf "${NDK_BIN}/llvm-nm"      "$WRAP/nm"
           ln -sf "${NDK_BIN}/llvm-strip"   "$WRAP/strip"
           ln -sf "${NDK_BIN}/llvm-objcopy" "$WRAP/objcopy"
+
+          # ★ target 前缀别名（NDK r23+ 移除了这些名字）
+          ln -sf "${NDK_BIN}/llvm-ar"      "$WRAP/${TARGET}-ar"
+          ln -sf "${NDK_BIN}/llvm-ranlib"  "$WRAP/${TARGET}-ranlib"
+          ln -sf "${NDK_BIN}/llvm-nm"      "$WRAP/${TARGET}-nm"
+          ln -sf "${NDK_BIN}/llvm-strip"   "$WRAP/${TARGET}-strip"
+          ln -sf "${NDK_BIN}/llvm-objcopy" "$WRAP/${TARGET}-objcopy"
+
+          # ★ 加 PATH，让 make 里裸命令 aarch64-linux-android-ar 也能命中
+          echo "$WRAP" >> $GITHUB_PATH
+
           ls -la "$WRAP"
 
       - name: Configure GCC
@@ -368,6 +369,11 @@ jobs:
               -c /tmp/t2.c -o /tmp/t2.o -v 2>&1 | tail -60 || true
             ls -la /tmp/t2.o 2>/dev/null || echo "(no .o)"
           fi
+          echo ""
+          echo "=== 检查 target 前缀工具是否存在 ==="
+          which aarch64-linux-android-ar || echo "(ar 找不到)"
+          which aarch64-linux-android-ranlib || echo "(ranlib 找不到)"
+          echo "PATH=$PATH"
 
       - name: Build target-libgfortran
         if: success()
