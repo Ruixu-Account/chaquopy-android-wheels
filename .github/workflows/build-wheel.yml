@@ -31,6 +31,20 @@ on:
 permissions:
   contents: write
 
+# ★ 新增：并发控制，避免手动触发两次互相覆盖 Release
+concurrency:
+  group: build-android-wheel-${{ github.ref }}
+  cancel-in-progress: false
+
+# ★ 新增：job 级环境变量，避免硬编码散落各处
+env:
+  CHAQUOPY_VERSION: "17.0.0"
+  CHAQUOPY_ROOT: /opt/chaquopy
+  NDK_VERSION: "27.3.13750724"
+  RUST_TOOLCHAIN: "1.90.0"
+  RUST_TARGET: "aarch64-linux-android"
+  ANDROID_API_LEVEL: "24"
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -47,152 +61,114 @@ jobs:
             3.12
             3.11
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-linux-android
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: /opt/chaquopy/server/pypi/packages
-          key: astrbot-android-wheels
-
       - name: Install system packages
         run: |
           sudo apt-get update
           sudo apt-get install -y wget unzip patchelf jq zip
 
-      - name: Clone Chaquopy 17.0.0
+      # ============================================================
+      # ★ 顺序调整：先 clone Chaquopy，后装 Rust
+      #   理由：rust cache 需要真实的 workspace 路径
+      # ============================================================
+      - name: Clone Chaquopy ${{ env.CHAQUOPY_VERSION }}
         run: |
-          git clone --depth 1 --branch 17.0.0 --recurse-submodules \
-            https://github.com/chaquo/chaquopy.git /opt/chaquopy
-          cd /opt/chaquopy
+          git clone --depth 1 --branch $CHAQUOPY_VERSION --recurse-submodules \
+            https://github.com/chaquo/chaquopy.git $CHAQUOPY_ROOT
+          cd $CHAQUOPY_ROOT
           git submodule update --init --recursive || true
           echo "=== packages 数量 ==="
-          ls /opt/chaquopy/server/pypi/packages/ | wc -l
+          ls $CHAQUOPY_ROOT/server/pypi/packages/ | wc -l
 
-      - name: Install Chaquopy build requirements
+      # ============================================================
+      # ★ Rust 环境重构：关键修复
+      #   - 显式安装指定 toolchain（1.90.0）
+      #   - 给它装 aarch64-linux-android target
+      #   - 通过 RUSTUP_TOOLCHAIN 覆盖 sdist 里的 rust-toolchain.toml
+      # ============================================================
+      - name: Setup Rust toolchain with Android target
         run: |
-          pip install -r /opt/chaquopy/server/pypi/requirements.txt
+          # 使用 rustup 官方脚本，安装指定版本 + 最小 profile
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+            sh -s -- -y --profile minimal --default-toolchain "$RUST_TOOLCHAIN"
+
+          # 让后续所有 step 都能找到 cargo/rustup
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+          # 当前 step 内也需要立即 source
+          . "$HOME/.cargo/env"
+
+          # 给这个 toolchain 装 Android target
+          rustup target add "$RUST_TARGET"
+
+          # ★ 关键：同时给 rust-toolchain.toml 里可能出现的变体装一遍
+          #   防止某些包 pin 的是 "1.90" 而不是 "1.90.0"
+          for tc in "$RUST_TOOLCHAIN" "${RUST_TOOLCHAIN%.*}" stable; do
+            rustup toolchain install "$tc" --profile minimal \
+              --target "$RUST_TARGET" 2>/dev/null || true
+          done
+
+          echo "=== rustc ===" && rustc --version
+          echo "=== installed targets (default) ==="
+          rustup target list --installed
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('scripts/**') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
 
       - name: Set Android env vars
         run: |
           echo "ANDROID_HOME=/usr/local/lib/android/sdk" >> $GITHUB_ENV
           echo "ANDROID_SDK_ROOT=/usr/local/lib/android/sdk" >> $GITHUB_ENV
-          echo "ANDROID_NDK_HOME=/usr/local/lib/android/sdk/ndk/27.3.13750724" >> $GITHUB_ENV
+          echo "ANDROID_NDK_HOME=/usr/local/lib/android/sdk/ndk/$NDK_VERSION" >> $GITHUB_ENV
+
+          # ★ Rust Android linker 配置（NDK r27c，API 24）
+          NDK_BIN="/usr/local/lib/android/sdk/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${NDK_BIN}/aarch64-linux-android${ANDROID_API_LEVEL}-clang" >> $GITHUB_ENV
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_AR=${NDK_BIN}/llvm-ar" >> $GITHUB_ENV
+
+          # ★ 强制所有后续 cargo 调用都用我们配置过的 toolchain，
+          #   这样 sdist 里的 rust-toolchain.toml 就不会再触发自动安装
+          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> $GITHUB_ENV
 
       - name: Pre-install NDK r27c
         continue-on-error: true
         run: |
-          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;27.3.13750724" || true
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;$NDK_VERSION" || true
 
-      - name: Patch Chaquopy build-wheel.py
+      - name: Verify Rust target availability
         run: |
-          python3 - <<'PY'
-          import re
-          p = "/opt/chaquopy/server/pypi/build-wheel.py"
-          src = open(p).read()
+          rustup target list --installed | grep "$RUST_TARGET" || {
+            echo "::error::Rust target $RUST_TARGET missing"
+            exit 1
+          }
+          echo "RUSTUP_TOOLCHAIN=$RUSTUP_TOOLCHAIN"
+          rustc --version
 
-          # Patch 1
-          old1 = 'python_executable=f"{self.build_env}/bin/python")'
-          new1 = 'python_executable=f"{self.build_env}/bin/python{self.python}")'
-          if old1 not in src:
-              raise SystemExit("patch1 target not found")
-          src = src.replace(old1, new1, 1)
+      - name: Install Chaquopy build requirements
+        run: |
+          pip install -r $CHAQUOPY_ROOT/server/pypi/requirements.txt
 
-          # Patch 2
-          old2 = ('            "PYO3_CROSS_PYTHON_VERSION": self.python,\n'
-                  '        })')
-          new2 = ('            "PYO3_CROSS_PYTHON_VERSION": self.python,\n'
-                  '            "PYO3_CROSS_LIB_DIR": f"{self.host_env}/chaquopy/lib",\n'
-                  '        })')
-          if old2 not in src:
-              raise SystemExit("patch2 target not found")
-          src = src.replace(old2, new2, 1)
+      - name: Apply Chaquopy build-wheel.py patches
+        run: python3 $GITHUB_WORKSPACE/scripts/patch-build-wheel.py
 
-          # Patch 3
-          pat3 = re.compile(
-              r'(for name in \["pthread", "rt"\]:\s*\n\s*run\(f"[^"]*lib\{name\}\.a"\))'
-          )
-          m3 = pat3.search(src)
-          if not m3:
-              raise SystemExit("patch3 anchor not found")
-          insertion3 = (
-              '\n        if self.needs_python:\n'
-              '            lib_dir = f"{self.host_env}/chaquopy/lib"\n'
-              '            py_lib = f"{lib_dir}/libpython{self.python}.so"\n'
-              '            generic_lib = f"{lib_dir}/libpython3.so"\n'
-              '            if exists(py_lib) and not exists(generic_lib):\n'
-              '                run(f"ln -s libpython{self.python}.so {generic_lib}")'
-          )
-          src = src[:m3.end()] + insertion3 + src[m3.end():]
-
-          # Patch 4: abi3 包 DT_NEEDED 里记录 libpython3.so，放行
-          old4 = ('            if tag.entry.d_tag == "DT_NEEDED":\n'
-                  '                req = COMPILER_LIBS.get(tag.needed)')
-          new4 = ('            if tag.entry.d_tag == "DT_NEEDED":\n'
-                  '                if tag.needed == "libpython3.so":\n'
-                  '                    continue\n'
-                  '                req = COMPILER_LIBS.get(tag.needed)')
-          if old4 not in src:
-              raise SystemExit("patch4 target not found")
-          src = src.replace(old4, new4, 1)
-
-          open(p, "w").write(src)
-          print("=== 4 patches ok ===")
-          PY
-          echo "=== verify ==="
-          grep -n "python_executable=" /opt/chaquopy/server/pypi/build-wheel.py
-          grep -n "PYO3_CROSS_LIB_DIR" /opt/chaquopy/server/pypi/build-wheel.py
-          grep -n "generic_lib" /opt/chaquopy/server/pypi/build-wheel.py
-          grep -n "libpython3.so" /opt/chaquopy/server/pypi/build-wheel.py
-          
       - name: Download Android Python target
         run: |
-          cd /opt/chaquopy
+          cd $CHAQUOPY_ROOT
           ./target/download-target.sh \
             maven/com/chaquo/python/target/${{ inputs.python_target_version }}
-          find /opt/chaquopy/maven -name "*.zip" -exec ls -la {} \;
+          find $CHAQUOPY_ROOT/maven -name "*.zip" -exec ls -la {} \;
 
       - name: Inject sysconfigdata into target zip
         run: |
-          ZIP="/opt/chaquopy/maven/com/chaquo/python/target/${{ inputs.python_target_version }}/target-${{ inputs.python_target_version }}-arm64-v8a.zip"
-          if [ ! -f "$ZIP" ]; then
-            echo "ERROR: target zip not found: $ZIP"
-            exit 1
-          fi
-
-          PY_VER="${{ inputs.python }}"
-          PY_VER_NODOT="${PY_VER//./}"
-
-          INJ=/tmp/inject_sysconfig
-          rm -rf "$INJ"
-          mkdir -p "$INJ/jniLibs/arm64-v8a"
-
-          cat > "$INJ/jniLibs/arm64-v8a/_sysconfigdata__linux_aarch64-linux-android.py" <<EOF
-          build_time_vars = {
-              "SOABI": "cpython-${PY_VER_NODOT}-aarch64-linux-android",
-              "EXT_SUFFIX": ".cpython-${PY_VER_NODOT}-aarch64-linux-android.so",
-              "VERSION": "${PY_VER}",
-              "LDVERSION": "${PY_VER}",
-              "py_version_nodot": "${PY_VER_NODOT}",
-              "py_version_short": "${PY_VER}",
-              "Py_ENABLE_SHARED": 1,
-              "Py_DEBUG": 0,
-              "Py_REF_DEBUG": 0,
-              "abiflags": "",
-              "prefix": "/data/data/com.astrbot.app/files/astrbot_root",
-              "exec_prefix": "/data/data/com.astrbot.app/files/astrbot_root",
-              "CC": "aarch64-linux-android24-clang",
-              "CXX": "aarch64-linux-android24-clang++",
-              "LDSHARED": "aarch64-linux-android24-clang -shared",
-          }
-          EOF
-
-          cd "$INJ"
-          zip "$ZIP" jniLibs/arm64-v8a/_sysconfigdata__linux_aarch64-linux-android.py
-          unzip -l "$ZIP" | grep sysconfigdata
+          bash $GITHUB_WORKSPACE/scripts/inject-sysconfig.sh \
+            "${{ inputs.python }}" "${{ inputs.python_target_version }}"
 
       - name: Download Chaquopy prebuilt deps
         run: bash $GITHUB_WORKSPACE/scripts/download-deps.sh
