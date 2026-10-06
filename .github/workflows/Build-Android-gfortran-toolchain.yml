@@ -1,0 +1,352 @@
+name: Build Android gfortran toolchain
+
+on:
+  workflow_dispatch:
+    inputs:
+      gcc_version:
+        description: 'GCC 版本'
+        required: true
+        default: '13.2.0'
+      ndk_version:
+        description: 'NDK 版本'
+        required: true
+        default: '27.3.13750724'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-gfortran-toolchain
+  cancel-in-progress: false
+
+env:
+  GCC_VERSION: ${{ inputs.gcc_version }}
+  NDK_VERSION: ${{ inputs.ndk_version }}
+  API_LEVEL: '24'
+  TARGET: aarch64-linux-android
+  PREFIX: /opt/gcc-android-gfortran
+  SRC_DIR: /tmp/gcc-src
+  BUILD_DIR: /tmp/gcc-build
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ============================================================
+      # 系统依赖
+      #   libgmp-dev/libmpfr-dev/libmpc-dev/libisl-dev 让 configure 直接
+      #   用系统库，跳过 contrib/download_prerequisites
+      # ============================================================
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential flex bison texinfo \
+            libgmp-dev libmpfr-dev libmpc-dev libisl-dev \
+            wget xz-utils file
+
+      # ============================================================
+      # NDK r27c
+      # ============================================================
+      - name: Set Android env
+        run: |
+          echo "ANDROID_HOME=/usr/local/lib/android/sdk" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=/usr/local/lib/android/sdk" >> $GITHUB_ENV
+          echo "ANDROID_NDK_HOME=/usr/local/lib/android/sdk/ndk/${NDK_VERSION}" >> $GITHUB_ENV
+
+      - name: Pre-install NDK r27c
+        continue-on-error: true
+        run: |
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;${NDK_VERSION}" || true
+
+      - name: Verify NDK layout
+        run: |
+          set -euo pipefail
+          NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          [ -x "$NDK_BIN/aarch64-linux-android${API_LEVEL}-clang" ] || {
+            echo "::error::找不到 NDK clang: $NDK_BIN/aarch64-linux-android${API_LEVEL}-clang"
+            ls "$NDK_BIN" | head -30
+            exit 1
+          }
+          echo "✅ NDK clang 存在"
+          "$NDK_BIN/aarch64-linux-android${API_LEVEL}-clang" --version | head -2
+
+      # ============================================================
+      # 缓存：GCC 源码 / GCC 构建目录
+      #   - 源码缓存节省每次 130MB 下载
+      #   - build 缓存让 make 幂等，迭代时只重编失败的部分
+      # ============================================================
+      - name: Cache GCC source
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.SRC_DIR }}
+          key: gcc-src-${{ env.GCC_VERSION }}-v2
+
+      - name: Cache GCC build
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.BUILD_DIR }}
+          key: gcc-build-${{ env.GCC_VERSION }}-ndk${{ env.NDK_VERSION }}-api${{ env.API_LEVEL }}-v2
+
+      # ============================================================
+      # 下载并解压 GCC 源码
+      # ============================================================
+      - name: Download GCC source
+        run: |
+          set -euo pipefail
+          mkdir -p "$SRC_DIR"
+          if [ -d "$SRC_DIR/gcc-${GCC_VERSION}" ] && [ -f "$SRC_DIR/gcc-${GCC_VERSION}/configure" ]; then
+            echo "✅ GCC 源码已缓存，跳过下载"
+            exit 0
+          fi
+
+          cd "$SRC_DIR"
+          # 清华镜像，gnu.org 太慢
+          URL="https://mirrors.tuna.tsinghua.edu.cn/gnu/gcc/gcc-${GCC_VERSION}/gcc-${GCC_VERSION}.tar.xz"
+          echo "下载 $URL"
+          wget -q --tries=3 --timeout=300 "$URL" -O gcc.tar.xz
+          tar -xf gcc.tar.xz
+          rm -f gcc.tar.xz
+          ls -d "$SRC_DIR/gcc-${GCC_VERSION}"
+
+      # ============================================================
+      # 生成工具 wrappers
+      #   - as wrapper: 把 GNU as 参数翻译成 clang -c
+      #   - ld 直接用 NDK clang driver（它可以作为 linker driver）
+      #   - ar/nm/strip/ranlib 直接软链到 llvm-*
+      # ============================================================
+      - name: Create tool wrappers
+        run: |
+          set -euo pipefail
+          NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          WRAP=/tmp/gcc-tools
+          mkdir -p "$WRAP"
+
+          # assembler wrapper：只保留 -o 和输入 .s/.S 文件，其余 as 特有参数丢掉
+          cat > "$WRAP/as" <<EOF
+          #!/bin/bash
+          # GCC 调用 as 时会传一堆 GNU as 特有参数，clang 不认。
+          # 只提取 -o 和输入文件，其余忽略。
+          out=""
+          input=""
+          while [ \$# -gt 0 ]; do
+            case "\$1" in
+              -o) out="\$2"; shift 2 ;;
+              -o*) out="\${1#-o}"; shift ;;
+              *.s|*.S) input="\$1"; shift ;;
+              *) shift ;;
+            esac
+          done
+          if [ -z "\$input" ] || [ -z "\$out" ]; then
+            echo "as-wrapper: missing input or output (input=\$input out=\$out)" >&2
+            exit 1
+          fi
+          exec "${NDK_BIN}/aarch64-linux-android${API_LEVEL}-clang" -c -o "\$out" "\$input"
+          EOF
+
+          chmod +x "$WRAP/as"
+          ln -sf "${NDK_BIN}/llvm-ar"      "$WRAP/ar"
+          ln -sf "${NDK_BIN}/llvm-ranlib"  "$WRAP/ranlib"
+          ln -sf "${NDK_BIN}/llvm-nm"      "$WRAP/nm"
+          ln -sf "${NDK_BIN}/llvm-strip"   "$WRAP/strip"
+          ln -sf "${NDK_BIN}/llvm-objcopy" "$WRAP/objcopy"
+          ls -la "$WRAP"
+          echo "--- as wrapper 内容 ---"
+          cat "$WRAP/as"
+
+      # ============================================================
+      # Configure GCC
+      #   --enable-languages=fortran   只编 fortran 前端
+      #   --disable-bootstrap          用 host gcc 编，省 2/3 时间
+      #   --with-ld=<clang>            让 GCC 用 NDK clang 作为 linker driver
+      #   --with-as=<wrapper>          as wrapper
+      # ============================================================
+      - name: Configure GCC
+        run: |
+          set -euo pipefail
+          NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          NDK_SYSROOT="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+          WRAP=/tmp/gcc-tools
+
+          mkdir -p "$BUILD_DIR"
+          cd "$BUILD_DIR"
+
+          # 幂等：已配置过就跳过
+          if [ -f Makefile ] && [ -f config.log ]; then
+            if grep -q "target=${TARGET}" config.log 2>/dev/null; then
+              echo "✅ 已配置过，跳过 configure"
+              exit 0
+            fi
+          fi
+
+          rm -rf "${BUILD_DIR:?}"/*
+          cd "$BUILD_DIR"
+
+          "$SRC_DIR/gcc-${GCC_VERSION}/configure" \
+            --target="$TARGET" \
+            --prefix="$PREFIX" \
+            --enable-languages=fortran \
+            --disable-bootstrap \
+            --disable-multilib \
+            --disable-shared \
+            --disable-threads \
+            --disable-libssp \
+            --disable-libquadmath \
+            --disable-libgomp \
+            --disable-libatomic \
+            --disable-libsanitizer \
+            --disable-libstdcxx \
+            --disable-nls \
+            --disable-werror \
+            --with-sysroot="$NDK_SYSROOT" \
+            --with-build-sysroot="$NDK_SYSROOT" \
+            --with-as="$WRAP/as" \
+            --with-ld="${NDK_BIN}/aarch64-linux-android${API_LEVEL}-clang" \
+            --with-ar="$WRAP/ar" \
+            --with-ranlib="$WRAP/ranlib" \
+            --with-nm="$WRAP/nm" \
+            --with-strip="$WRAP/strip" \
+            --with-arch=armv8-a \
+            --with-abi=lp64 \
+            --enable-clocale=gnu \
+            --enable-lto \
+            2>&1 | tee /tmp/gcc-configure.log
+
+          if [ ! -f Makefile ]; then
+            echo "::error::configure 未生成 Makefile，最后 80 行："
+            tail -80 /tmp/gcc-configure.log
+            exit 1
+          fi
+          echo "✅ configure 完成"
+
+      # ============================================================
+      # 编译：分三步
+      #   all-gcc                 → gfortran 前端 (cc1, f951, gcc 驱动)
+      #   all-target-libgcc       → libgcc.a + crtbegin.o 等
+      #   all-target-libgfortran  → libgfortran.a
+      # 顺序不能变，后一步依赖前一步产物
+      # ============================================================
+      - name: Build all-gcc (Fortran frontend)
+        run: |
+          set -euo pipefail
+          cd "$BUILD_DIR"
+          echo "=== 开始编译 all-gcc ==="
+          make -j"$(nproc)" all-gcc 2>&1 | tee /tmp/gcc-build-gcc.log
+
+      - name: Build target-libgcc
+        run: |
+          set -euo pipefail
+          cd "$BUILD_DIR"
+          echo "=== 开始编译 all-target-libgcc ==="
+          make -j"$(nproc)" all-target-libgcc 2>&1 | tee /tmp/gcc-build-libgcc.log
+
+      - name: Build target-libgfortran
+        run: |
+          set -euo pipefail
+          cd "$BUILD_DIR"
+          echo "=== 开始编译 all-target-libgfortran ==="
+          make -j"$(nproc)" all-target-libgfortran 2>&1 | tee /tmp/gcc-build-libgfortran.log
+
+      # ============================================================
+      # 安装
+      # ============================================================
+      - name: Install GCC
+        run: |
+          set -euo pipefail
+          cd "$BUILD_DIR"
+          make install-gcc install-target-libgcc install-target-libgfortran \
+            2>&1 | tee /tmp/gcc-install.log
+          echo "=== 安装后目录 ==="
+          ls -la "$PREFIX/bin/"
+
+      # ============================================================
+      # 验证：交叉编译一个最小 Fortran 程序，检查输出架构
+      # ============================================================
+      - name: Verify gfortran
+        run: |
+          set -euo pipefail
+          GFC="$PREFIX/bin/${TARGET}-gfortran"
+          [ -x "$GFC" ] || { echo "::error::gfortran 未找到: $GFC"; exit 1; }
+
+          echo "=== gfortran 版本 ==="
+          "$GFC" --version | head -3
+
+          echo "=== 交叉编译测试 ==="
+          cat > /tmp/hello.f90 <<'EOF'
+          program hello
+            integer :: i
+            real :: s
+            s = 0.0
+            do i = 1, 10
+              s = s + real(i)
+            end do
+            print *, "sum:", s
+          end program hello
+          EOF
+
+          "$GFC" -c /tmp/hello.f90 -o /tmp/hello.o
+          file /tmp/hello.o
+          echo "--- readelf 架构检查 ---"
+          readelf -h /tmp/hello.o | grep -E "Machine|Class|Data"
+
+          # 必须包含 aarch64
+          if readelf -h /tmp/hello.o | grep -qi "aarch64\|AArch64"; then
+            echo "✅ 输出架构是 aarch64"
+          else
+            echo "::error::输出架构不是 aarch64"
+            readelf -h /tmp/hello.o
+            exit 1
+          fi
+
+          echo "=== libgfortran 检查 ==="
+          find "$PREFIX" -name "libgfortran*" -o -name "libgcc*" | head -20
+
+      # ============================================================
+      # 打包上传
+      # ============================================================
+      - name: Pack toolchain
+        run: |
+          set -euo pipefail
+          cd "$PREFIX"
+          # 打包时保留顶层 bin/ lib/ 结构
+          tar -czf /tmp/gfortran-android-arm64.tar.gz .
+          ls -la /tmp/gfortran-android-arm64.tar.gz
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gfortran-android-arm64-gcc${{ env.GCC_VERSION }}
+          path: /tmp/gfortran-android-arm64.tar.gz
+          retention-days: 90
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: toolchain-gfortran
+          name: "gfortran for Android arm64"
+          body: |
+            Cross gfortran toolchain for Android `aarch64-linux-android`, API ${{ env.API_LEVEL }}.
+            Built from GCC ${{ env.GCC_VERSION }} + NDK r27c (${{ env.NDK_VERSION }}).
+
+            Contains `aarch64-linux-android-gfortran` and `libgfortran` / `libgcc`.
+          files: /tmp/gfortran-android-arm64.tar.gz
+          make_latest: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Summary
+        if: success()
+        run: |
+          echo "## ✅ gfortran toolchain built" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Download URL**：" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "https://github.com/${{ github.repository }}/releases/download/toolchain-gfortran/gfortran-android-arm64.tar.gz" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "在 SciPy workflow 的 \`gfortran_url\` 输入里填这个 URL。" >> $GITHUB_STEP_SUMMARY
