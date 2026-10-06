@@ -66,14 +66,10 @@ jobs:
           NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
           [ -x "$NDK_BIN/aarch64-linux-android${API_LEVEL}-clang" ] || {
             echo "::error::找不到 NDK clang"
-            ls "$NDK_BIN" | head -30
             exit 1
           }
           "$NDK_BIN/aarch64-linux-android${API_LEVEL}-clang" --version | head -2
 
-      # ============================================================
-      # 修复 NDK 头文件布局（asm/bits 符号链接）
-      # ============================================================
       - name: Fix NDK header layout for GCC
         run: |
           set -euo pipefail
@@ -83,16 +79,12 @@ jobs:
           for sub in asm bits; do
             if [ -d "$NDK_SYSROOT/usr/include/$ARCH_DIR/$sub" ] && [ ! -e "$NDK_SYSROOT/usr/include/$sub" ]; then
               ln -s "$ARCH_DIR/$sub" "$NDK_SYSROOT/usr/include/$sub"
-              echo "✅ ln -s $ARCH_DIR/$sub"
             fi
           done
-
-          ls -la "$NDK_SYSROOT/usr/include/" | grep -E "asm|bits" || true
-          ls -la "$NDK_SYSROOT/usr/include/asm/types.h" 2>/dev/null && echo "✅ asm/types.h OK" || echo "⚠️ asm/types.h 缺失"
+          ls -la "$NDK_SYSROOT/usr/include/asm/types.h" 2>/dev/null || echo "⚠️ asm/types.h 缺失"
 
       # ============================================================
-      # ★ 新增：预定义头文件，替代含括号的 -D 宏
-      #   用 -include 注入，命令行里无特殊字符，shell 不会报错
+      # ★ 扩充 predef header：加上 clang 特有的 nullability 属性
       # ============================================================
       - name: Create GCC predef header
         run: |
@@ -101,9 +93,7 @@ jobs:
           #define __ANDROID_API__ 24
           #endif
 
-          /* Silence NDK's clang-only availability attributes for GCC.
-           * These macros are #ifndef-guarded in NDK cdefs.h, so our
-           * definitions win over the originals. */
+          /* ---- NDK availability ---- */
           #ifndef __INTRODUCED_IN
           #define __INTRODUCED_IN(api_level)
           #endif
@@ -115,6 +105,50 @@ jobs:
           #endif
           #ifndef __ANDROID_UNAVAILABLE_SYMBOLS_ARE_WEAK__
           #define __ANDROID_UNAVAILABLE_SYMBOLS_ARE_WEAK__ 1
+          #endif
+
+          /* ---- clang nullability qualifiers ---- */
+          #ifndef _Nonnull
+          #define _Nonnull
+          #endif
+          #ifndef _Nullable
+          #define _Nullable
+          #endif
+          #ifndef _Null_unspecified
+          #define _Null_unspecified
+          #endif
+
+          /* ---- clang function-attribute sugar ---- */
+          #ifndef __printflike
+          #define __printflike(fmtarg, firstvararg)
+          #endif
+          #ifndef __scanflike
+          #define __scanflike(fmtarg, firstvararg)
+          #endif
+          #ifndef __format_arg
+          #define __format_arg(fmtarg)
+          #endif
+          #ifndef __wur
+          #define __wur
+          #endif
+          #ifndef __errordecl
+          #define __errordecl(name, msg)
+          #endif
+
+          /* ---- clang attribute sugar ---- */
+          #ifndef __attribute_const__
+          #define __attribute_const__ __attribute__((const))
+          #endif
+          #ifndef __attribute_pure__
+          #define __attribute_pure__ __attribute__((pure))
+          #endif
+
+          /* ---- clang builtin shims ---- */
+          #ifndef __predict_true
+          #define __predict_true(exp)  __builtin_expect((exp) != 0, 1)
+          #endif
+          #ifndef __predict_false
+          #define __predict_false(exp) __builtin_expect((exp) != 0, 0)
           #endif
           EOF
 
@@ -132,7 +166,7 @@ jobs:
           set -euo pipefail
           mkdir -p "$SRC_DIR"
           if [ -d "$SRC_DIR/gcc-${GCC_VERSION}" ] && [ -f "$SRC_DIR/gcc-${GCC_VERSION}/configure" ]; then
-            echo "✅ GCC 源码已缓存"
+            echo "✅ 已缓存"
             exit 0
           fi
           cd "$SRC_DIR"
@@ -140,7 +174,6 @@ jobs:
           wget -q --tries=3 --timeout=300 "$URL" -O gcc.tar.xz
           tar -xf gcc.tar.xz
           rm -f gcc.tar.xz
-          df -h /
 
       - name: Create tool wrappers
         run: |
@@ -190,7 +223,6 @@ jobs:
           ln -sf "${NDK_BIN}/llvm-nm"      "$WRAP/nm"
           ln -sf "${NDK_BIN}/llvm-strip"   "$WRAP/strip"
           ln -sf "${NDK_BIN}/llvm-objcopy" "$WRAP/objcopy"
-
           ls -la "$WRAP"
 
       - name: Configure GCC
@@ -239,18 +271,13 @@ jobs:
             exit 1
           }
           echo "✅ configure 完成"
-          df -h /
 
       - name: Build all-gcc (Fortran frontend)
         run: |
           set -euo pipefail
           cd "$BUILD_DIR"
           make -j"$(nproc)" all-gcc 2>&1 | tee /tmp/gcc-build-gcc.log
-          df -h /
 
-      # ============================================================
-      # ★ 关键：CFLAGS_FOR_TARGET 只含 -include，无括号
-      # ============================================================
       - name: Build target-libgcc
         run: |
           set -euo pipefail
@@ -258,9 +285,8 @@ jobs:
           make -j"$(nproc)" all-target-libgcc \
             CFLAGS_FOR_TARGET="-g -O2 -include $PREDEF_HEADER" \
             2>&1 | tee /tmp/gcc-build-libgcc.log
-          df -h /
 
-      - name: Dump libgcc config.log on failure
+      - name: Dump libgcc failure
         if: failure()
         run: |
           LOG="$BUILD_DIR/aarch64-linux-android/libgcc/config.log"
@@ -274,17 +300,10 @@ jobs:
           #include <sys/types.h>
           int main(void){return 0;}
           EOF
-            echo "--- xgcc -c t2.c ---"
             "$XGCC" -B"$BUILD_DIR/gcc/" -include "$PREDEF_HEADER" \
               -c /tmp/t2.c -o /tmp/t2.o -v 2>&1 | tail -60 || true
             ls -la /tmp/t2.o 2>/dev/null || echo "(no .o)"
           fi
-          echo ""
-          echo "=== wrappers（只显示文本）==="
-          for f in /tmp/gcc-tools/*; do
-            echo "--- $f ---"
-            if file "$f" | grep -q text; then cat "$f"; else echo "(binary, skipped)"; fi
-          done
 
       - name: Build target-libgfortran
         if: success()
@@ -294,7 +313,6 @@ jobs:
           make -j"$(nproc)" all-target-libgfortran \
             CFLAGS_FOR_TARGET="-g -O2 -include $PREDEF_HEADER" \
             2>&1 | tee /tmp/gcc-build-libgfortran.log
-          df -h /
 
       - name: Install GCC
         if: success()
