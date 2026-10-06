@@ -87,24 +87,35 @@ jobs:
           ls -la "$NDK_SYSROOT/usr/include/asm/types.h" 2>/dev/null || echo "⚠️ asm/types.h 缺失"
 
       # ============================================================
-      # 修复 2：sed NDK sys/cdefs.h 里的 availability 宏
-      #   直接改源文件，把 define 行改成空展开。
+      # 修复 2：物理删除所有 availability 标注的调用点
+      #   不修宏定义——因为宏可能是间接转发，改定义没用。
+      #   直接把头文件里所有 __INTRODUCED_IN(...) 调用替换成空格，
+      #   让宏彻底没有展开机会。
       # ============================================================
-      - name: Patch NDK cdefs.h for GCC compatibility
+      - name: Strip NDK availability annotations for GCC
         run: |
           set -euo pipefail
           NDK_SYSROOT="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
-          CDEFS="$NDK_SYSROOT/usr/include/sys/cdefs.h"
+          INCLUDE_DIR="$NDK_SYSROOT/usr/include"
 
-          echo "=== BEFORE ==="
-          grep -nE '#[[:space:]]*define[[:space:]]+__(INTRODUCED|DEPRECATED|REMOVED)_IN' "$CDEFS" || echo "(无匹配)"
+          echo "=== 调用点数量（before）==="
+          grep -rE "__INTRODUCED_IN|__DEPRECATED_IN|__REMOVED_IN" "$INCLUDE_DIR" 2>/dev/null | wc -l || true
 
-          for MAC in __INTRODUCED_IN __DEPRECATED_IN __REMOVED_IN; do
-            sed -i -E "s|^([[:space:]]*#define[[:space:]]+${MAC}\\([^)]*\\))[[:space:]]+.*\$|\\1 /* patched for GCC */|" "$CDEFS"
-          done
+          echo ""
+          echo "=== 打碎所有调用点 ==="
+          find "$INCLUDE_DIR" -type f \( -name '*.h' -o -name '*.hpp' \) -print0 | \
+            xargs -0 -n 100 sed -i \
+              -e 's/__INTRODUCED_IN([^)]*)/ /g' \
+              -e 's/__DEPRECATED_IN([^)]*)/ /g' \
+              -e 's/__REMOVED_IN([^)]*)/ /g'
 
-          echo "=== AFTER ==="
-          grep -nE '#[[:space:]]*define[[:space:]]+__(INTRODUCED|DEPRECATED|REMOVED)_IN' "$CDEFS" || echo "(无匹配)"
+          echo ""
+          echo "=== 调用点数量（after）==="
+          grep -rE "__INTRODUCED_IN|__DEPRECATED_IN|__REMOVED_IN" "$INCLUDE_DIR" 2>/dev/null | wc -l || true
+
+          echo ""
+          echo "=== 关键行验证：api-level.h:192-196 ==="
+          sed -n '192,196p' "$INCLUDE_DIR/android/api-level.h"
 
       # ============================================================
       # 兜底 predef header
