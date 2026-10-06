@@ -71,6 +71,30 @@ jobs:
           echo "✅ NDK clang 存在"
           "$NDK_BIN/aarch64-linux-android${API_LEVEL}-clang" --version | head -2
 
+      # ============================================================
+      # ★ 修复 NDK 头文件布局：GCC 只搜 usr/include/，
+      #   但架构相关头文件（asm/bits）在 usr/include/aarch64-linux-android/。
+      #   创建符号链接把它们映射到 usr/include/ 下。
+      # ============================================================
+      - name: Fix NDK header layout for GCC
+        run: |
+          set -euo pipefail
+          NDK_SYSROOT="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+          ARCH_DIR="aarch64-linux-android"
+
+          for sub in asm bits; do
+            if [ -d "$NDK_SYSROOT/usr/include/$ARCH_DIR/$sub" ] && [ ! -e "$NDK_SYSROOT/usr/include/$sub" ]; then
+              ln -s "$ARCH_DIR/$sub" "$NDK_SYSROOT/usr/include/$sub"
+              echo "✅ ln -s $ARCH_DIR/$sub -> $NDK_SYSROOT/usr/include/$sub"
+            else
+              echo "（$sub 已存在或不存在，跳过）"
+            fi
+          done
+
+          echo "--- 验证 ---"
+          ls -la "$NDK_SYSROOT/usr/include/" | grep -E "asm|bits" || true
+          ls -la "$NDK_SYSROOT/usr/include/asm/types.h" 2>/dev/null && echo "✅ asm/types.h 可访问" || echo "⚠️ asm/types.h 不可访问"
+
       - name: Cache GCC source
         uses: actions/cache@v4
         with:
@@ -87,7 +111,6 @@ jobs:
           fi
           cd "$SRC_DIR"
           URL="https://mirrors.tuna.tsinghua.edu.cn/gnu/gcc/gcc-${GCC_VERSION}/gcc-${GCC_VERSION}.tar.xz"
-          echo "下载 $URL"
           wget -q --tries=3 --timeout=300 "$URL" -O gcc.tar.xz
           tar -xf gcc.tar.xz
           rm -f gcc.tar.xz
@@ -95,10 +118,7 @@ jobs:
           df -h /
 
       # ============================================================
-      # ★ 工具 wrappers
-      #   - clang 必须显式 --target，否则猜错架构
-      #   - 修 GCC 13 vs clang 18 的 .eh_frame / .gcc_except_table
-      #     section flags 冲突："aw" → "a"
+      # 工具 wrappers
       # ============================================================
       - name: Create tool wrappers
         run: |
@@ -122,7 +142,7 @@ jobs:
           [ -z "\$input" ] && { echo "as-wrapper: no input" >&2; exit 1; }
           [ -z "\$out" ]   && { echo "as-wrapper: no -o" >&2; exit 1; }
 
-          # ★ 修 GCC 13 vs clang 18 section flags 冲突
+          # 修 GCC 13 vs clang 18 section flags 冲突
           if grep -q '\.section.*\.eh_frame,"aw"' "\$input" 2>/dev/null; then
             sed -i -E 's/(\.section[[:space:]]+\.eh_frame),"aw"/\1,"a"/g' "\$input"
           fi
@@ -154,10 +174,6 @@ jobs:
 
           echo "--- wrappers ---"
           ls -la "$WRAP"
-          echo "--- as ---"
-          cat "$WRAP/as"
-          echo "--- ld ---"
-          cat "$WRAP/ld"
 
       - name: Configure GCC
         run: |
@@ -215,11 +231,16 @@ jobs:
           df -h /
           du -sh "$BUILD_DIR" "$SRC_DIR" 2>/dev/null || true
 
+      # ============================================================
+      # ★ libgcc 编译：加宏定义绕过 GCC 不认识 clang availability 属性的问题
+      # ============================================================
       - name: Build target-libgcc
         run: |
           set -euo pipefail
           cd "$BUILD_DIR"
-          make -j"$(nproc)" all-target-libgcc 2>&1 | tee /tmp/gcc-build-libgcc.log
+          make -j"$(nproc)" all-target-libgcc \
+            CFLAGS_FOR_TARGET='-g -O2 -D__ANDROID_API__=24 -D__INTRODUCED_IN(x)= -D__ANDROID_UNAVAILABLE_SYMBOLS_ARE_WEAK__=1' \
+            2>&1 | tee /tmp/gcc-build-libgcc.log
           df -h /
           du -sh "$BUILD_DIR" 2>/dev/null || true
 
@@ -230,29 +251,31 @@ jobs:
           if [ -f "$LOG" ]; then
             echo "=== libgcc/config.log 尾部 200 行 ==="
             tail -200 "$LOG"
-          else
-            echo "(config.log 不存在)"
           fi
           echo ""
-          echo "=== 手动复现 xgcc 编译 ==="
+          echo "=== 手动复现 xgcc 编译（含系统头文件的测试）==="
           XGCC="$BUILD_DIR/gcc/xgcc"
           if [ -x "$XGCC" ]; then
-            echo 'int main(void){return 0;}' > /tmp/t.c
-            echo "--- xgcc -c ---"
-            "$XGCC" -B"$BUILD_DIR/gcc/" -c /tmp/t.c -o /tmp/t.o -v 2>&1 | tail -80 || true
-            ls -la /tmp/t.o 2>/dev/null || echo "(no .o produced)"
-            echo ""
-            echo "--- xgcc 链接 ---"
-            "$XGCC" -B"$BUILD_DIR/gcc/" /tmp/t.c -o /tmp/t -v 2>&1 | tail -80 || true
-            ls -la /tmp/t 2>/dev/null || echo "(no executable produced)"
-          else
-            echo "(xgcc 不存在: $XGCC)"
+            cat > /tmp/t2.c <<'EOF'
+          #include <stdio.h>
+          #include <sys/types.h>
+          int main(void){return 0;}
+          EOF
+            echo "--- xgcc -c t2.c（含系统头文件）---"
+            "$XGCC" -B"$BUILD_DIR/gcc/" \
+              -D__ANDROID_API__=24 -D__INTRODUCED_IN\(x\)= \
+              -c /tmp/t2.c -o /tmp/t2.o -v 2>&1 | tail -60 || true
+            ls -la /tmp/t2.o 2>/dev/null || echo "(no .o)"
           fi
           echo ""
-          echo "=== wrappers 内容 ==="
+          echo "=== wrappers 内容（只显示文本文件）==="
           for f in /tmp/gcc-tools/*; do
             echo "--- $f ---"
-            cat "$f" 2>/dev/null || echo "(binary)"
+            if file "$f" | grep -q text; then
+              cat "$f"
+            else
+              echo "(binary, skipped)"
+            fi
           done
 
       - name: Build target-libgfortran
@@ -260,7 +283,9 @@ jobs:
         run: |
           set -euo pipefail
           cd "$BUILD_DIR"
-          make -j"$(nproc)" all-target-libgfortran 2>&1 | tee /tmp/gcc-build-libgfortran.log
+          make -j"$(nproc)" all-target-libgfortran \
+            CFLAGS_FOR_TARGET='-g -O2 -D__ANDROID_API__=24 -D__INTRODUCED_IN(x)= -D__ANDROID_UNAVAILABLE_SYMBOLS_ARE_WEAK__=1' \
+            2>&1 | tee /tmp/gcc-build-libgfortran.log
           df -h /
           du -sh "$BUILD_DIR" 2>/dev/null || true
 
@@ -273,7 +298,6 @@ jobs:
             2>&1 | tee /tmp/gcc-install.log
           echo "=== 安装后目录 ==="
           ls -la "$PREFIX/bin/"
-          echo "--- prefix 大小 ---"
           du -sh "$PREFIX"
           df -h /
 
@@ -287,7 +311,6 @@ jobs:
           echo "=== gfortran 版本 ==="
           "$GFC" --version | head -3
 
-          echo "=== 交叉编译测试 ==="
           cat > /tmp/hello.f90 <<'EOF'
           program hello
             integer :: i
@@ -302,18 +325,11 @@ jobs:
 
           "$GFC" -c /tmp/hello.f90 -o /tmp/hello.o
           file /tmp/hello.o
-          echo "--- readelf 架构检查 ---"
           readelf -h /tmp/hello.o | grep -E "Machine|Class|Data"
+          readelf -h /tmp/hello.o | grep -qi "aarch64\|AArch64" \
+            || { echo "::error::输出架构不是 aarch64"; exit 1; }
+          echo "✅ 输出架构是 aarch64"
 
-          if readelf -h /tmp/hello.o | grep -qi "aarch64\|AArch64"; then
-            echo "✅ 输出架构是 aarch64"
-          else
-            echo "::error::输出架构不是 aarch64"
-            readelf -h /tmp/hello.o
-            exit 1
-          fi
-
-          echo "=== libgfortran / libgcc 检查 ==="
           find "$PREFIX" -name "libgfortran*" -o -name "libgcc*" | head -20
 
       - name: Cleanup before pack
@@ -333,7 +349,6 @@ jobs:
           cd "$PREFIX"
           tar -czf /tmp/gfortran-android-arm64.tar.gz .
           ls -la /tmp/gfortran-android-arm64.tar.gz
-          du -h /tmp/gfortran-android-arm64.tar.gz
 
       - name: Upload artifact
         if: success()
@@ -366,5 +381,3 @@ jobs:
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "https://github.com/${{ github.repository }}/releases/download/toolchain-gfortran/gfortran-android-arm64.tar.gz" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "在 SciPy workflow 的 \`gfortran_url\` 输入里填这个 URL。" >> $GITHUB_STEP_SUMMARY
