@@ -3,7 +3,7 @@
 # 供 build-wheel.py 作为本地 pip 索引使用。
 #
 # 三个来源：
-#   1. chaquopy-* 系列编译依赖（chaquo.com/pypi-13.1，带包名子目录）
+#   1. chaquopy 官方索引预编译依赖（chaquo.com/pypi-13.1，带包名子目录）
 #   2. Chaquopy 预构建的最终产物（lxml / cryptography / pandas，同样带子目录）
 #   3. 自有 GitHub Release（numpy 2.5.3 等，扁平存放，无子目录）
 #
