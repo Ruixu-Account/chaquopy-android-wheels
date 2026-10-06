@@ -70,6 +70,9 @@ jobs:
           }
           "$NDK_BIN/aarch64-linux-android${API_LEVEL}-clang" --version | head -2
 
+      # ============================================================
+      # 修复 1：NDK 头文件布局（asm/bits 符号链接）
+      # ============================================================
       - name: Fix NDK header layout for GCC
         run: |
           set -euo pipefail
@@ -84,7 +87,52 @@ jobs:
           ls -la "$NDK_SYSROOT/usr/include/asm/types.h" 2>/dev/null || echo "⚠️ asm/types.h 缺失"
 
       # ============================================================
-      # ★ 扩充 predef header：加上 clang 特有的 nullability 属性
+      # 修复 2：sed NDK sys/cdefs.h 里的 availability 宏
+      #   前面的尝试证明 #ifndef 拦不住——NDK 定义先于我们生效。
+      #   唯一可靠做法：直接改源文件，把 define 行改成空展开。
+      # ============================================================
+      - name: Patch NDK cdefs.h for GCC compatibility
+        run: |
+          set -euo pipefail
+          NDK_SYSROOT="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+          CDEFS="$NDK_SYSROOT/usr/include/sys/cdefs.h"
+
+          echo "=== BEFORE ==="
+          grep -nE '#\s*define\s+__[A-Z_]*IN\b' "$CDEFS" || echo "(无匹配)"
+
+          python3 - "$CDEFS" <<'PY'
+import re
+import sys
+
+path = sys.argv[1]
+src = open(path).read()
+
+# 处理三种宏：__INTRODUCED_IN / __DEPRECATED_IN / __REMOVED_IN
+targets = ['__INTRODUCED_IN', '__DEPRECATED_IN', '__REMOVED_IN']
+changed = []
+
+for macro in targets:
+    # 匹配 define 行（含行尾续行符 \），整体替换为单行空展开
+    pattern = rf'^#\s*define\s+{re.escape(macro)}\b.*?(?<!\\)$'
+    new_src, n = re.subn(
+        pattern,
+        rf'#define {macro}(api_level) /* patched for GCC */',
+        src,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    if n:
+        changed.append(f'{macro}: {n} 处')
+        src = new_src
+
+open(path, 'w').write(src)
+print("已修补：", changed or "(无匹配)")
+PY
+
+          echo "=== AFTER ==="
+          grep -nE '#\s*define\s+__[A-Z_]*IN\b' "$CDEFS" || echo "(无匹配)"
+
+      # ============================================================
+      # 兜底 predef header（保底，不指望它拦得住 NDK 定义）
       # ============================================================
       - name: Create GCC predef header
         run: |
@@ -93,7 +141,6 @@ jobs:
           #define __ANDROID_API__ 24
           #endif
 
-          /* ---- NDK availability ---- */
           #ifndef __INTRODUCED_IN
           #define __INTRODUCED_IN(api_level)
           #endif
@@ -107,7 +154,6 @@ jobs:
           #define __ANDROID_UNAVAILABLE_SYMBOLS_ARE_WEAK__ 1
           #endif
 
-          /* ---- clang nullability qualifiers ---- */
           #ifndef _Nonnull
           #define _Nonnull
           #endif
@@ -118,7 +164,6 @@ jobs:
           #define _Null_unspecified
           #endif
 
-          /* ---- clang function-attribute sugar ---- */
           #ifndef __printflike
           #define __printflike(fmtarg, firstvararg)
           #endif
@@ -135,7 +180,6 @@ jobs:
           #define __errordecl(name, msg)
           #endif
 
-          /* ---- clang attribute sugar ---- */
           #ifndef __attribute_const__
           #define __attribute_const__ __attribute__((const))
           #endif
@@ -143,7 +187,6 @@ jobs:
           #define __attribute_pure__ __attribute__((pure))
           #endif
 
-          /* ---- clang builtin shims ---- */
           #ifndef __predict_true
           #define __predict_true(exp)  __builtin_expect((exp) != 0, 1)
           #endif
@@ -152,8 +195,8 @@ jobs:
           #endif
           EOF
 
-          echo "--- $PREDEF_HEADER ---"
-          cat "$PREDEF_HEADER"
+          echo "--- predef header 行数 ---"
+          wc -l "$PREDEF_HEADER"
 
       - name: Cache GCC source
         uses: actions/cache@v4
