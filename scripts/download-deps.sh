@@ -70,7 +70,7 @@ download_one() {
 
   file="$(basename "$rel")"
   target_dir="${DIST_DIR}/$(dirname "$rel")"
-  url="${base}/${file}"
+  url="${base}/${rel}"
 
   mkdir -p "$target_dir"
 
