@@ -1,0 +1,339 @@
+name: Build SciPy (Android arm64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      scipy_version:
+        description: 'SciPy 版本'
+        required: true
+        default: '1.18.1'
+      python:
+        description: 'Python 版本'
+        required: true
+        default: '3.12'
+        type: choice
+        options:
+          - '3.12'
+          - '3.13'
+      python_target_version:
+        description: 'Chaquopy Python target 版本'
+        required: true
+        default: '3.12.12-0'
+      gfortran_url:
+        description: '预编译 gfortran tarball URL（留空则尝试内置默认）'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-scipy-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CHAQUOPY_VERSION: "17.0.0"
+  CHAQUOPY_ROOT: /opt/chaquopy
+  NDK_VERSION: "27.3.13750724"
+  ANDROID_API_LEVEL: "24"
+  GFORTRAN_DIR: /opt/android-gfortran
+  # 默认 gfortran 下载地址（社区维护，可能要替换成你自建镜像）
+  DEFAULT_GFORTRAN_URL: "https://github.com/chaquo/chaquopy/releases/download/toolchains/gfortran-android-arm64.tar.gz"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python (host)
+        uses: actions/setup-python@v5
+        with:
+          python-version: |
+            3.12
+            3.11
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget unzip patchelf jq zip ninja-build
+
+      # ============================================================
+      # Fortran 工具链
+      #   SciPy 有大量 .f/.f90 源码，meson 需要 fortran 编译器。
+      #   NDK r27c 不带 gfortran，必须外部提供。
+      # ============================================================
+      - name: Prepare Fortran toolchain
+        run: |
+          set -euo pipefail
+          URL="${{ inputs.gfortran_url }}"
+          [ -z "$URL" ] && URL="$DEFAULT_GFORTRAN_URL"
+
+          echo "尝试下载 gfortran: $URL"
+          if ! wget -q --tries=3 --timeout=120 "$URL" -O /tmp/gfortran.tgz; then
+            echo "::error::gfortran 下载失败。请通过 inputs.gfortran_url 指定可用的 tarball。"
+            exit 1
+          fi
+
+          rm -rf "$GFORTRAN_DIR"
+          mkdir -p "$GFORTRAN_DIR"
+          tar -xzf /tmp/gfortran.tgz -C "$GFORTRAN_DIR" --strip-components=1 || \
+            tar -xzf /tmp/gfortran.tgz -C "$GFORTRAN_DIR"
+
+          # 加 PATH
+          if [ -d "$GFORTRAN_DIR/bin" ]; then
+            echo "$GFORTRAN_DIR/bin" >> $GITHUB_PATH
+          fi
+
+      - name: Verify gfortran availability
+        run: |
+          set -euo pipefail
+          # 找可用的 fortran 编译器：优先 aarch64-linux-android-gfortran，其次 gfortran
+          FORTRAN_BIN=""
+          for cand in \
+            "$GFORTRAN_DIR/bin/aarch64-linux-android-gfortran" \
+            "$GFORTRAN_DIR/bin/gfortran" \
+            "$(command -v aarch64-linux-android-gfortran || true)" \
+            "$(command -v gfortran || true)"
+          do
+            if [ -n "$cand" ] && [ -x "$cand" ]; then
+              FORTRAN_BIN="$cand"
+              break
+            fi
+          done
+
+          if [ -z "$FORTRAN_BIN" ]; then
+            echo "::error::未找到可用的 Fortran 交叉编译器"
+            ls -la "$GFORTRAN_DIR" 2>/dev/null || true
+            ls -la "$GFORTRAN_DIR/bin" 2>/dev/null || true
+            exit 1
+          fi
+
+          echo "✅ Fortran compiler: $FORTRAN_BIN"
+          "$FORTRAN_BIN" --version | head -2
+
+          # 导出给后续步骤
+          echo "FORTRAN_BIN=$FORTRAN_BIN" >> $GITHUB_ENV
+
+      - name: Clone Chaquopy ${{ env.CHAQUOPY_VERSION }}
+        run: |
+          git clone --depth 1 --branch $CHAQUOPY_VERSION --recurse-submodules \
+            https://github.com/chaquo/chaquopy.git $CHAQUOPY_ROOT
+          cd $CHAQUOPY_ROOT
+          git submodule update --init --recursive || true
+          echo "=== packages 数量 ==="
+          ls $CHAQUOPY_ROOT/server/pypi/packages/ | wc -l
+
+      - name: Set Android env vars
+        run: |
+          echo "ANDROID_HOME=/usr/local/lib/android/sdk" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=/usr/local/lib/android/sdk" >> $GITHUB_ENV
+          echo "ANDROID_NDK_HOME=/usr/local/lib/android/sdk/ndk/$NDK_VERSION" >> $GITHUB_ENV
+
+      - name: Pre-install NDK r27c
+        continue-on-error: true
+        run: |
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;$NDK_VERSION" || true
+
+      - name: Install Chaquopy build requirements
+        run: |
+          pip install -r $CHAQUOPY_ROOT/server/pypi/requirements.txt
+
+      - name: Apply Chaquopy build-wheel.py patches
+        run: python3 $GITHUB_WORKSPACE/scripts/patch-build-wheel.py
+
+      - name: Download Android Python target
+        run: |
+          cd $CHAQUOPY_ROOT
+          ./target/download-target.sh \
+            maven/com/chaquo/python/target/${{ inputs.python_target_version }}
+          find $CHAQUOPY_ROOT/maven -name "*.zip" -exec ls -la {} \;
+
+      - name: Inject sysconfigdata into target zip
+        run: |
+          bash $GITHUB_WORKSPACE/scripts/inject-sysconfig.sh \
+            "${{ inputs.python }}" "${{ inputs.python_target_version }}"
+
+      - name: Download Chaquopy prebuilt deps
+        run: bash $GITHUB_WORKSPACE/scripts/download-deps.sh
+
+      # ============================================================
+      # ★ 生成 meson cross-file，含 fortran 段
+      #   SciPy 1.11+ 走 meson-python，patch-build-wheel.py 的 patch3
+      #   会把它注入 setup-args。
+      # ============================================================
+      - name: Generate meson cross-file
+        run: |
+          set -euo pipefail
+          NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          CROSS_FILE=/tmp/android-arm64.ini
+
+          cat > "$CROSS_FILE" <<EOF
+          [binaries]
+          c = '${NDK_BIN}/aarch64-linux-android${ANDROID_API_LEVEL}-clang'
+          cpp = '${NDK_BIN}/aarch64-linux-android${ANDROID_API_LEVEL}-clang++'
+          fortran = '${FORTRAN_BIN}'
+          ar = '${NDK_BIN}/llvm-ar'
+          strip = '${NDK_BIN}/llvm-strip'
+          ld = '${NDK_BIN}/ld.lld'
+          ranlib = '${NDK_BIN}/llvm-ranlib'
+
+          [host_machine]
+          system = 'android'
+          cpu_family = 'aarch64'
+          cpu = 'aarch64'
+          endian = 'little'
+
+          [properties]
+          longdouble_format = 'IEEE_QUAD_LE'
+
+          [built-in options]
+          c_args = ['-D__BIONIC_NO_PAGE_SIZE_MACRO']
+          cpp_args = ['-D__BIONIC_NO_PAGE_SIZE_MACRO']
+          EOF
+
+          echo "=== cross-file 内容 ==="
+          cat "$CROSS_FILE"
+
+      # ============================================================
+      # 生成 SciPy recipe
+      # ============================================================
+      - name: Prepare SciPy recipe
+        env:
+          SCIPY_VERSION: ${{ inputs.scipy_version }}
+        run: |
+          set -euo pipefail
+          PYPI_DIR="/opt/chaquopy/server/pypi"
+          OFFICIAL="$PYPI_DIR/packages/scipy"
+          RECIPE_DIR="$PYPI_DIR/packages/astrbot-scipy"
+
+          rm -rf "$RECIPE_DIR"
+
+          if [ -d "$OFFICIAL" ] && [ -f "$OFFICIAL/meta.yaml" ]; then
+            echo "✅ 使用官方 scipy recipe"
+            cp -a "$OFFICIAL" "$RECIPE_DIR"
+
+            python3 - "$RECIPE_DIR/meta.yaml" "$SCIPY_VERSION" <<'PYEOF'
+          import os, re, sys
+          from jinja2 import Template, StrictUndefined
+
+          path, ver = sys.argv[1], sys.argv[2]
+          raw = open(path).read()
+          try:
+              src = Template(raw, undefined=StrictUndefined).render(
+                  PY_VER=os.environ.get("PYTHON_VER", "3.12")
+              )
+          except Exception:
+              src = raw
+
+          # 1. package.version
+          src = re.sub(r'(^\s*version:\s*)(?:"[^"]*"|\'[^\']*\'|[^\s#]+)',
+                       rf'\g<1>"{ver}"', src, count=1, flags=re.MULTILINE)
+          # 2. source.url 里的版本号
+          src = re.sub(r'scipy-[\d.]+\.(tar\.gz|zip)',
+                       f'scipy-{ver}.tar.gz', src, flags=re.IGNORECASE)
+          # 3. 删除 sha256/md5
+          src = re.sub(r'^\s*(sha256|md5):.*$\n?', '', src, flags=re.MULTILINE)
+          # 4. numpy pin 到 2.5.3
+          src = re.sub(r'numpy\s+[\d.]+', 'numpy 2.5.3', src)
+          # 5. 确保 SCIPY_USE_PYTHRAN=0
+          if 'SCIPY_USE_PYTHRAN' not in src:
+              if 'script_env:' in src:
+                  src = re.sub(r'(\s*script_env:\s*\n)',
+                               r'\1    - SCIPY_USE_PYTHRAN=0\n',
+                               src, count=1)
+              else:
+                  src = re.sub(r'(\s*build:\s*\n)',
+                               r'\1  script_env:\n    - SCIPY_USE_PYTHRAN=0\n',
+                               src, count=1)
+          open(path, 'w').write(src)
+          print(src)
+          PYEOF
+          else
+            echo "ℹ️  官方无 scipy recipe，手写一个"
+            mkdir -p "$RECIPE_DIR"
+            cat > "$RECIPE_DIR/meta.yaml" <<EOF
+          package:
+            name: scipy
+            version: "$SCIPY_VERSION"
+          source:
+            url: https://files.pythonhosted.org/packages/source/s/scipy/scipy-$SCIPY_VERSION.tar.gz
+          build:
+            number: 0
+            script_env:
+              - SCIPY_USE_PYTHRAN=0
+          requirements:
+            build:
+              - fortran
+              - ninja
+              - meson-python
+              - cython
+              - pkgconfig
+            host:
+              - python
+              - numpy 2.5.3
+              - chaquopy-libgfortran 4.9
+              - chaquopy-openblas 0.2.20
+          EOF
+          fi
+
+          echo "=== 最终 meta.yaml ==="
+          cat "$RECIPE_DIR/meta.yaml"
+
+      - name: Build SciPy
+        env:
+          PYTHON_VER: ${{ inputs.python }}
+        run: |
+          set -euo pipefail
+          PYPI_DIR="/opt/chaquopy/server/pypi"
+          RECIPE_DIR="$PYPI_DIR/packages/astrbot-scipy"
+          LOG="/tmp/build-scipy.log"
+
+          echo "=== Fortran 环境 ==="
+          echo "FORTRAN_BIN=$FORTRAN_BIN"
+          "$FORTRAN_BIN" --version | head -2
+
+          cd "$PYPI_DIR"
+          if ! python build-wheel.py \
+                --python "$PYTHON_VER" \
+                --abi arm64-v8a \
+                "$RECIPE_DIR" > "$LOG" 2>&1; then
+            echo "❌ SciPy 构建失败，最后 120 行："
+            tail -120 "$LOG"
+            exit 1
+          fi
+
+          echo "=== 构建产物 ==="
+          find "$PYPI_DIR/dist" -name "*scipy*android_*.whl" -ls
+
+      - name: Collect wheel
+        if: success()
+        run: |
+          mkdir -p /tmp/all-wheels
+          find /opt/chaquopy/server/pypi/dist -name "*scipy*android_*.whl" \
+            -exec cp -f {} /tmp/all-wheels/ \;
+          ls -la /tmp/all-wheels/
+
+      - name: Upload wheel artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scipy-wheels-${{ github.run_number }}
+          path: /tmp/all-wheels/*.whl
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Upload to GitHub Release (latest)
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: "Latest Builds"
+          body: "Auto-built Android arm64 wheels."
+          files: /tmp/all-wheels/*.whl
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
