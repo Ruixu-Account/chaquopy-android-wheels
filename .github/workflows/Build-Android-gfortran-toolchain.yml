@@ -87,10 +87,9 @@ jobs:
           ls -la "$NDK_SYSROOT/usr/include/asm/types.h" 2>/dev/null || echo "⚠️ asm/types.h 缺失"
 
       # ============================================================
-      # 修复 2：物理删除所有 availability 标注的调用点
-      #   不修宏定义——因为宏可能是间接转发，改定义没用。
-      #   直接把头文件里所有 __INTRODUCED_IN(...) 调用替换成空格，
-      #   让宏彻底没有展开机会。
+      # 修复 2：物理删除所有 availability 标注的【调用点】，
+      #   但【保留 #define 行】。
+      #   sed 用 /^[[:space:]]*#/! 地址前缀，只对非 # 行做替换。
       # ============================================================
       - name: Strip NDK availability annotations for GCC
         run: |
@@ -102,20 +101,24 @@ jobs:
           grep -rE "__INTRODUCED_IN|__DEPRECATED_IN|__REMOVED_IN" "$INCLUDE_DIR" 2>/dev/null | wc -l || true
 
           echo ""
-          echo "=== 打碎所有调用点 ==="
+          echo "=== 打碎非 # 行的所有调用点（保留宏定义）==="
           find "$INCLUDE_DIR" -type f \( -name '*.h' -o -name '*.hpp' \) -print0 | \
-            xargs -0 -n 100 sed -i \
-              -e 's/__INTRODUCED_IN([^)]*)/ /g' \
-              -e 's/__DEPRECATED_IN([^)]*)/ /g' \
-              -e 's/__REMOVED_IN([^)]*)/ /g'
+            xargs -0 -n 100 sed -i -E \
+              -e '/^[[:space:]]*#/!s/__INTRODUCED_IN\([^)]*\)/ /g' \
+              -e '/^[[:space:]]*#/!s/__DEPRECATED_IN\([^)]*\)/ /g' \
+              -e '/^[[:space:]]*#/!s/__REMOVED_IN\([^)]*\)/ /g'
 
           echo ""
           echo "=== 调用点数量（after）==="
           grep -rE "__INTRODUCED_IN|__DEPRECATED_IN|__REMOVED_IN" "$INCLUDE_DIR" 2>/dev/null | wc -l || true
 
           echo ""
-          echo "=== 关键行验证：api-level.h:192-196 ==="
+          echo "=== 验证 1：api-level.h:192-196 ==="
           sed -n '192,196p' "$INCLUDE_DIR/android/api-level.h"
+
+          echo ""
+          echo "=== 验证 2：versioning.h:53-62（看 #define 是否完好）==="
+          sed -n '53,62p' "$INCLUDE_DIR/android/versioning.h"
 
       # ============================================================
       # 兜底 predef header
