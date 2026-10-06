@@ -37,10 +37,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Disk usage (baseline)
+        run: df -h / /tmp 2>/dev/null || df -h /
+
       # ============================================================
       # 系统依赖
-      #   libgmp-dev/libmpfr-dev/libmpc-dev/libisl-dev 让 configure 直接
-      #   用系统库，跳过 contrib/download_prerequisites
       # ============================================================
       - name: Install build dependencies
         run: |
@@ -77,9 +78,7 @@ jobs:
           "$NDK_BIN/aarch64-linux-android${API_LEVEL}-clang" --version | head -2
 
       # ============================================================
-      # 缓存：GCC 源码 / GCC 构建目录
-      #   - 源码缓存节省每次 130MB 下载
-      #   - build 缓存让 make 幂等，迭代时只重编失败的部分
+      # 缓存：只缓存 GCC 源码（~800M），不缓存 build 目录
       # ============================================================
       - name: Cache GCC source
         uses: actions/cache@v4
@@ -87,15 +86,6 @@ jobs:
           path: ${{ env.SRC_DIR }}
           key: gcc-src-${{ env.GCC_VERSION }}-v2
 
-      - name: Cache GCC build
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.BUILD_DIR }}
-          key: gcc-build-${{ env.GCC_VERSION }}-ndk${{ env.NDK_VERSION }}-api${{ env.API_LEVEL }}-v2
-
-      # ============================================================
-      # 下载并解压 GCC 源码
-      # ============================================================
       - name: Download GCC source
         run: |
           set -euo pipefail
@@ -104,21 +94,19 @@ jobs:
             echo "✅ GCC 源码已缓存，跳过下载"
             exit 0
           fi
-
           cd "$SRC_DIR"
-          # 清华镜像，gnu.org 太慢
           URL="https://mirrors.tuna.tsinghua.edu.cn/gnu/gcc/gcc-${GCC_VERSION}/gcc-${GCC_VERSION}.tar.xz"
           echo "下载 $URL"
           wget -q --tries=3 --timeout=300 "$URL" -O gcc.tar.xz
           tar -xf gcc.tar.xz
           rm -f gcc.tar.xz
           ls -d "$SRC_DIR/gcc-${GCC_VERSION}"
+          df -h /
 
       # ============================================================
-      # 生成工具 wrappers
-      #   - as wrapper: 把 GNU as 参数翻译成 clang -c
-      #   - ld 直接用 NDK clang driver（它可以作为 linker driver）
-      #   - ar/nm/strip/ranlib 直接软链到 llvm-*
+      # ★ 工具 wrappers
+      #   关键修复：clang 必须显式 --target，否则猜错架构，
+      #   导致 xgcc 编测试程序时找不到 aarch64 的启动文件。
       # ============================================================
       - name: Create tool wrappers
         run: |
@@ -126,14 +114,12 @@ jobs:
           NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
           WRAP=/tmp/gcc-tools
           mkdir -p "$WRAP"
+          CLANG_TARGET="aarch64-linux-android${API_LEVEL}"
 
-          # assembler wrapper：只保留 -o 和输入 .s/.S 文件，其余 as 特有参数丢掉
+          # as wrapper：GCC 的 as 参数太多，只保留 -o 和输入
           cat > "$WRAP/as" <<EOF
           #!/bin/bash
-          # GCC 调用 as 时会传一堆 GNU as 特有参数，clang 不认。
-          # 只提取 -o 和输入文件，其余忽略。
-          out=""
-          input=""
+          out=""; input=""
           while [ \$# -gt 0 ]; do
             case "\$1" in
               -o) out="\$2"; shift 2 ;;
@@ -142,50 +128,51 @@ jobs:
               *) shift ;;
             esac
           done
-          if [ -z "\$input" ] || [ -z "\$out" ]; then
-            echo "as-wrapper: missing input or output (input=\$input out=\$out)" >&2
-            exit 1
-          fi
-          exec "${NDK_BIN}/aarch64-linux-android${API_LEVEL}-clang" -c -o "\$out" "\$input"
+          [ -z "\$input" ] && { echo "as-wrapper: no input" >&2; exit 1; }
+          [ -z "\$out" ]   && { echo "as-wrapper: no -o" >&2; exit 1; }
+          exec "${NDK_BIN}/clang" --target=${CLANG_TARGET} -c -o "\$out" "\$input"
           EOF
-
           chmod +x "$WRAP/as"
+
+          # ld wrapper：强制 --target，避免 clang 以 host 架构找启动文件
+          cat > "$WRAP/ld" <<EOF
+          #!/bin/bash
+          exec "${NDK_BIN}/clang" --target=${CLANG_TARGET} "\$@"
+          EOF
+          chmod +x "$WRAP/ld"
+
+          # gcc driver wrapper（备用）
+          cat > "$WRAP/gcc" <<EOF
+          #!/bin/bash
+          exec "${NDK_BIN}/clang" --target=${CLANG_TARGET} "\$@"
+          EOF
+          chmod +x "$WRAP/gcc"
+
           ln -sf "${NDK_BIN}/llvm-ar"      "$WRAP/ar"
           ln -sf "${NDK_BIN}/llvm-ranlib"  "$WRAP/ranlib"
           ln -sf "${NDK_BIN}/llvm-nm"      "$WRAP/nm"
           ln -sf "${NDK_BIN}/llvm-strip"   "$WRAP/strip"
           ln -sf "${NDK_BIN}/llvm-objcopy" "$WRAP/objcopy"
+
+          echo "--- wrappers ---"
           ls -la "$WRAP"
-          echo "--- as wrapper 内容 ---"
+          echo "--- as ---"
           cat "$WRAP/as"
+          echo "--- ld ---"
+          cat "$WRAP/ld"
 
       # ============================================================
       # Configure GCC
-      #   --enable-languages=fortran   只编 fortran 前端
-      #   --disable-bootstrap          用 host gcc 编，省 2/3 时间
-      #   --with-ld=<clang>            让 GCC 用 NDK clang 作为 linker driver
-      #   --with-as=<wrapper>          as wrapper
       # ============================================================
       - name: Configure GCC
         run: |
           set -euo pipefail
-          NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
           NDK_SYSROOT="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
           WRAP=/tmp/gcc-tools
 
           mkdir -p "$BUILD_DIR"
           cd "$BUILD_DIR"
-
-          # 幂等：已配置过就跳过
-          if [ -f Makefile ] && [ -f config.log ]; then
-            if grep -q "target=${TARGET}" config.log 2>/dev/null; then
-              echo "✅ 已配置过，跳过 configure"
-              exit 0
-            fi
-          fi
-
           rm -rf "${BUILD_DIR:?}"/*
-          cd "$BUILD_DIR"
 
           "$SRC_DIR/gcc-${GCC_VERSION}/configure" \
             --target="$TARGET" \
@@ -206,7 +193,7 @@ jobs:
             --with-sysroot="$NDK_SYSROOT" \
             --with-build-sysroot="$NDK_SYSROOT" \
             --with-as="$WRAP/as" \
-            --with-ld="${NDK_BIN}/aarch64-linux-android${API_LEVEL}-clang" \
+            --with-ld="$WRAP/ld" \
             --with-ar="$WRAP/ar" \
             --with-ranlib="$WRAP/ranlib" \
             --with-nm="$WRAP/nm" \
@@ -217,45 +204,82 @@ jobs:
             --enable-lto \
             2>&1 | tee /tmp/gcc-configure.log
 
-          if [ ! -f Makefile ]; then
+          [ -f Makefile ] || {
             echo "::error::configure 未生成 Makefile，最后 80 行："
             tail -80 /tmp/gcc-configure.log
             exit 1
-          fi
+          }
           echo "✅ configure 完成"
+          df -h /
 
       # ============================================================
-      # 编译：分三步
-      #   all-gcc                 → gfortran 前端 (cc1, f951, gcc 驱动)
-      #   all-target-libgcc       → libgcc.a + crtbegin.o 等
-      #   all-target-libgfortran  → libgfortran.a
-      # 顺序不能变，后一步依赖前一步产物
+      # 编译三阶段
       # ============================================================
       - name: Build all-gcc (Fortran frontend)
         run: |
           set -euo pipefail
           cd "$BUILD_DIR"
-          echo "=== 开始编译 all-gcc ==="
           make -j"$(nproc)" all-gcc 2>&1 | tee /tmp/gcc-build-gcc.log
+          df -h /
+          du -sh "$BUILD_DIR" "$SRC_DIR" 2>/dev/null || true
 
       - name: Build target-libgcc
         run: |
           set -euo pipefail
           cd "$BUILD_DIR"
-          echo "=== 开始编译 all-target-libgcc ==="
           make -j"$(nproc)" all-target-libgcc 2>&1 | tee /tmp/gcc-build-libgcc.log
+          df -h /
+          du -sh "$BUILD_DIR" 2>/dev/null || true
+
+      # ============================================================
+      # 失败诊断：libgcc configure 挂掉时 dump config.log
+      # ============================================================
+      - name: Dump libgcc config.log on failure
+        if: failure()
+        run: |
+          LOG="$BUILD_DIR/aarch64-linux-android/libgcc/config.log"
+          if [ -f "$LOG" ]; then
+            echo "=== libgcc/config.log 尾部 200 行 ==="
+            tail -200 "$LOG"
+          else
+            echo "(config.log 不存在)"
+          fi
+          echo ""
+          echo "=== 手动复现 xgcc 编译 ==="
+          XGCC="$BUILD_DIR/gcc/xgcc"
+          if [ -x "$XGCC" ]; then
+            echo 'int main(void){return 0;}' > /tmp/t.c
+            echo "--- xgcc -c ---"
+            "$XGCC" -B"$BUILD_DIR/gcc/" -c /tmp/t.c -o /tmp/t.o -v 2>&1 | tail -50 || true
+            ls -la /tmp/t.o 2>/dev/null || echo "(no .o produced)"
+            echo ""
+            echo "--- xgcc 链接 ---"
+            "$XGCC" -B"$BUILD_DIR/gcc/" /tmp/t.c -o /tmp/t -v 2>&1 | tail -50 || true
+            ls -la /tmp/t 2>/dev/null || echo "(no executable produced)"
+          else
+            echo "(xgcc 不存在: $XGCC)"
+          fi
+          echo ""
+          echo "=== wrappers 内容 ==="
+          for f in /tmp/gcc-tools/*; do
+            echo "--- $f ---"
+            cat "$f" 2>/dev/null || echo "(binary)"
+          done
 
       - name: Build target-libgfortran
+        if: success()
         run: |
           set -euo pipefail
           cd "$BUILD_DIR"
-          echo "=== 开始编译 all-target-libgfortran ==="
           make -j"$(nproc)" all-target-libgfortran 2>&1 | tee /tmp/gcc-build-libgfortran.log
+          df -h /
+          du -sh "$BUILD_DIR" 2>/dev/null || true
 
       # ============================================================
       # 安装
       # ============================================================
       - name: Install GCC
+        if: success()
         run: |
           set -euo pipefail
           cd "$BUILD_DIR"
@@ -263,11 +287,15 @@ jobs:
             2>&1 | tee /tmp/gcc-install.log
           echo "=== 安装后目录 ==="
           ls -la "$PREFIX/bin/"
+          echo "--- prefix 大小 ---"
+          du -sh "$PREFIX"
+          df -h /
 
       # ============================================================
-      # 验证：交叉编译一个最小 Fortran 程序，检查输出架构
+      # 验证：交叉编译最小 Fortran 程序，检查 aarch64 架构
       # ============================================================
       - name: Verify gfortran
+        if: success()
         run: |
           set -euo pipefail
           GFC="$PREFIX/bin/${TARGET}-gfortran"
@@ -294,7 +322,6 @@ jobs:
           echo "--- readelf 架构检查 ---"
           readelf -h /tmp/hello.o | grep -E "Machine|Class|Data"
 
-          # 必须包含 aarch64
           if readelf -h /tmp/hello.o | grep -qi "aarch64\|AArch64"; then
             echo "✅ 输出架构是 aarch64"
           else
@@ -303,21 +330,33 @@ jobs:
             exit 1
           fi
 
-          echo "=== libgfortran 检查 ==="
+          echo "=== libgfortran / libgcc 检查 ==="
           find "$PREFIX" -name "libgfortran*" -o -name "libgcc*" | head -20
 
       # ============================================================
-      # 打包上传
+      # 清理：删源码 + build + NDK，腾空间给打包
       # ============================================================
+      - name: Cleanup before pack
+        if: success()
+        run: |
+          df -h /
+          rm -rf "$SRC_DIR" "$BUILD_DIR"
+          rm -rf "$ANDROID_NDK_HOME" || true
+          echo "--- 清理后 ---"
+          df -h /
+          du -sh "$PREFIX" 2>/dev/null || true
+
       - name: Pack toolchain
+        if: success()
         run: |
           set -euo pipefail
           cd "$PREFIX"
-          # 打包时保留顶层 bin/ lib/ 结构
           tar -czf /tmp/gfortran-android-arm64.tar.gz .
           ls -la /tmp/gfortran-android-arm64.tar.gz
+          du -h /tmp/gfortran-android-arm64.tar.gz
 
       - name: Upload artifact
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: gfortran-android-arm64-gcc${{ env.GCC_VERSION }}
@@ -325,6 +364,7 @@ jobs:
           retention-days: 90
 
       - name: Upload to GitHub Release
+        if: success()
         uses: softprops/action-gh-release@v2
         with:
           tag_name: toolchain-gfortran
@@ -332,8 +372,6 @@ jobs:
           body: |
             Cross gfortran toolchain for Android `aarch64-linux-android`, API ${{ env.API_LEVEL }}.
             Built from GCC ${{ env.GCC_VERSION }} + NDK r27c (${{ env.NDK_VERSION }}).
-
-            Contains `aarch64-linux-android-gfortran` and `libgfortran` / `libgcc`.
           files: /tmp/gfortran-android-arm64.tar.gz
           make_latest: false
         env:
@@ -344,7 +382,7 @@ jobs:
         run: |
           echo "## ✅ gfortran toolchain built" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Download URL**：" >> $GITHUB_STEP_SUMMARY
+          echo "**下载 URL**：" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "https://github.com/${{ github.repository }}/releases/download/toolchain-gfortran/gfortran-android-arm64.tar.gz" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
