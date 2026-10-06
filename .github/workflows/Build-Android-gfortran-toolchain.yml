@@ -88,8 +88,7 @@ jobs:
 
       # ============================================================
       # 修复 2：sed NDK sys/cdefs.h 里的 availability 宏
-      #   前面的尝试证明 #ifndef 拦不住——NDK 定义先于我们生效。
-      #   唯一可靠做法：直接改源文件，把 define 行改成空展开。
+      #   直接改源文件，把 define 行改成空展开。
       # ============================================================
       - name: Patch NDK cdefs.h for GCC compatibility
         run: |
@@ -98,41 +97,17 @@ jobs:
           CDEFS="$NDK_SYSROOT/usr/include/sys/cdefs.h"
 
           echo "=== BEFORE ==="
-          grep -nE '#\s*define\s+__[A-Z_]*IN\b' "$CDEFS" || echo "(无匹配)"
+          grep -nE '#[[:space:]]*define[[:space:]]+__(INTRODUCED|DEPRECATED|REMOVED)_IN' "$CDEFS" || echo "(无匹配)"
 
-          python3 - "$CDEFS" <<'PY'
-import re
-import sys
-
-path = sys.argv[1]
-src = open(path).read()
-
-# 处理三种宏：__INTRODUCED_IN / __DEPRECATED_IN / __REMOVED_IN
-targets = ['__INTRODUCED_IN', '__DEPRECATED_IN', '__REMOVED_IN']
-changed = []
-
-for macro in targets:
-    # 匹配 define 行（含行尾续行符 \），整体替换为单行空展开
-    pattern = rf'^#\s*define\s+{re.escape(macro)}\b.*?(?<!\\)$'
-    new_src, n = re.subn(
-        pattern,
-        rf'#define {macro}(api_level) /* patched for GCC */',
-        src,
-        flags=re.MULTILINE | re.DOTALL,
-    )
-    if n:
-        changed.append(f'{macro}: {n} 处')
-        src = new_src
-
-open(path, 'w').write(src)
-print("已修补：", changed or "(无匹配)")
-PY
+          for MAC in __INTRODUCED_IN __DEPRECATED_IN __REMOVED_IN; do
+            sed -i -E "s|^([[:space:]]*#define[[:space:]]+${MAC}\\([^)]*\\))[[:space:]]+.*\$|\\1 /* patched for GCC */|" "$CDEFS"
+          done
 
           echo "=== AFTER ==="
-          grep -nE '#\s*define\s+__[A-Z_]*IN\b' "$CDEFS" || echo "(无匹配)"
+          grep -nE '#[[:space:]]*define[[:space:]]+__(INTRODUCED|DEPRECATED|REMOVED)_IN' "$CDEFS" || echo "(无匹配)"
 
       # ============================================================
-      # 兜底 predef header（保底，不指望它拦得住 NDK 定义）
+      # 兜底 predef header
       # ============================================================
       - name: Create GCC predef header
         run: |
