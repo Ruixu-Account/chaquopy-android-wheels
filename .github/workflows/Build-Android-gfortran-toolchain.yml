@@ -40,9 +40,6 @@ jobs:
       - name: Disk usage (baseline)
         run: df -h / /tmp 2>/dev/null || df -h /
 
-      # ============================================================
-      # 系统依赖
-      # ============================================================
       - name: Install build dependencies
         run: |
           sudo apt-get update
@@ -51,9 +48,6 @@ jobs:
             libgmp-dev libmpfr-dev libmpc-dev libisl-dev \
             wget xz-utils file
 
-      # ============================================================
-      # NDK r27c
-      # ============================================================
       - name: Set Android env
         run: |
           echo "ANDROID_HOME=/usr/local/lib/android/sdk" >> $GITHUB_ENV
@@ -77,9 +71,6 @@ jobs:
           echo "✅ NDK clang 存在"
           "$NDK_BIN/aarch64-linux-android${API_LEVEL}-clang" --version | head -2
 
-      # ============================================================
-      # 缓存：只缓存 GCC 源码（~800M），不缓存 build 目录
-      # ============================================================
       - name: Cache GCC source
         uses: actions/cache@v4
         with:
@@ -105,8 +96,9 @@ jobs:
 
       # ============================================================
       # ★ 工具 wrappers
-      #   关键修复：clang 必须显式 --target，否则猜错架构，
-      #   导致 xgcc 编测试程序时找不到 aarch64 的启动文件。
+      #   - clang 必须显式 --target，否则猜错架构
+      #   - 修 GCC 13 vs clang 18 的 .eh_frame / .gcc_except_table
+      #     section flags 冲突："aw" → "a"
       # ============================================================
       - name: Create tool wrappers
         run: |
@@ -116,7 +108,6 @@ jobs:
           mkdir -p "$WRAP"
           CLANG_TARGET="aarch64-linux-android${API_LEVEL}"
 
-          # as wrapper：GCC 的 as 参数太多，只保留 -o 和输入
           cat > "$WRAP/as" <<EOF
           #!/bin/bash
           out=""; input=""
@@ -130,18 +121,25 @@ jobs:
           done
           [ -z "\$input" ] && { echo "as-wrapper: no input" >&2; exit 1; }
           [ -z "\$out" ]   && { echo "as-wrapper: no -o" >&2; exit 1; }
+
+          # ★ 修 GCC 13 vs clang 18 section flags 冲突
+          if grep -q '\.section.*\.eh_frame,"aw"' "\$input" 2>/dev/null; then
+            sed -i -E 's/(\.section[[:space:]]+\.eh_frame),"aw"/\1,"a"/g' "\$input"
+          fi
+          if grep -q '\.section.*\.gcc_except_table,"aw"' "\$input" 2>/dev/null; then
+            sed -i -E 's/(\.section[[:space:]]+\.gcc_except_table),"aw"/\1,"a"/g' "\$input"
+          fi
+
           exec "${NDK_BIN}/clang" --target=${CLANG_TARGET} -c -o "\$out" "\$input"
           EOF
           chmod +x "$WRAP/as"
 
-          # ld wrapper：强制 --target，避免 clang 以 host 架构找启动文件
           cat > "$WRAP/ld" <<EOF
           #!/bin/bash
           exec "${NDK_BIN}/clang" --target=${CLANG_TARGET} "\$@"
           EOF
           chmod +x "$WRAP/ld"
 
-          # gcc driver wrapper（备用）
           cat > "$WRAP/gcc" <<EOF
           #!/bin/bash
           exec "${NDK_BIN}/clang" --target=${CLANG_TARGET} "\$@"
@@ -161,9 +159,6 @@ jobs:
           echo "--- ld ---"
           cat "$WRAP/ld"
 
-      # ============================================================
-      # Configure GCC
-      # ============================================================
       - name: Configure GCC
         run: |
           set -euo pipefail
@@ -212,9 +207,6 @@ jobs:
           echo "✅ configure 完成"
           df -h /
 
-      # ============================================================
-      # 编译三阶段
-      # ============================================================
       - name: Build all-gcc (Fortran frontend)
         run: |
           set -euo pipefail
@@ -231,9 +223,6 @@ jobs:
           df -h /
           du -sh "$BUILD_DIR" 2>/dev/null || true
 
-      # ============================================================
-      # 失败诊断：libgcc configure 挂掉时 dump config.log
-      # ============================================================
       - name: Dump libgcc config.log on failure
         if: failure()
         run: |
@@ -250,11 +239,11 @@ jobs:
           if [ -x "$XGCC" ]; then
             echo 'int main(void){return 0;}' > /tmp/t.c
             echo "--- xgcc -c ---"
-            "$XGCC" -B"$BUILD_DIR/gcc/" -c /tmp/t.c -o /tmp/t.o -v 2>&1 | tail -50 || true
+            "$XGCC" -B"$BUILD_DIR/gcc/" -c /tmp/t.c -o /tmp/t.o -v 2>&1 | tail -80 || true
             ls -la /tmp/t.o 2>/dev/null || echo "(no .o produced)"
             echo ""
             echo "--- xgcc 链接 ---"
-            "$XGCC" -B"$BUILD_DIR/gcc/" /tmp/t.c -o /tmp/t -v 2>&1 | tail -50 || true
+            "$XGCC" -B"$BUILD_DIR/gcc/" /tmp/t.c -o /tmp/t -v 2>&1 | tail -80 || true
             ls -la /tmp/t 2>/dev/null || echo "(no executable produced)"
           else
             echo "(xgcc 不存在: $XGCC)"
@@ -275,9 +264,6 @@ jobs:
           df -h /
           du -sh "$BUILD_DIR" 2>/dev/null || true
 
-      # ============================================================
-      # 安装
-      # ============================================================
       - name: Install GCC
         if: success()
         run: |
@@ -291,9 +277,6 @@ jobs:
           du -sh "$PREFIX"
           df -h /
 
-      # ============================================================
-      # 验证：交叉编译最小 Fortran 程序，检查 aarch64 架构
-      # ============================================================
       - name: Verify gfortran
         if: success()
         run: |
@@ -333,9 +316,6 @@ jobs:
           echo "=== libgfortran / libgcc 检查 ==="
           find "$PREFIX" -name "libgfortran*" -o -name "libgcc*" | head -20
 
-      # ============================================================
-      # 清理：删源码 + build + NDK，腾空间给打包
-      # ============================================================
       - name: Cleanup before pack
         if: success()
         run: |
