@@ -264,10 +264,6 @@ jobs:
           ls -la "$WRAP"
           ls -la "$TARGET_BIN"
 
-      # ============================================================
-      # Configure GCC
-      #   ★ 新增 --disable-libbacktrace 等 5 项，避免构建无关 target 库
-      # ============================================================
       - name: Configure GCC
         run: |
           set -euo pipefail
@@ -320,6 +316,66 @@ jobs:
           }
           echo "✅ configure 完成"
 
+      # ============================================================
+      # host 端 libbacktrace 占位文件
+      #   --disable-libbacktrace 同时禁 host + target，但 cc1-checksum.cc
+      #   硬编码依赖 host 端 libbacktrace.a。建空文件骗过 make。
+      # ============================================================
+      - name: Workaround libbacktrace host dependency
+        run: |
+          set -euo pipefail
+          mkdir -p "$BUILD_DIR/libbacktrace/.libs"
+          : > "$BUILD_DIR/libbacktrace/.libs/libbacktrace.a"
+          ls -la "$BUILD_DIR/libbacktrace/.libs/"
+
+      # ============================================================
+      # ★ 诊断：手动跑一次 target-libbacktrace 的 configure，
+      #   dump config.log + 手动链接测试。continue-on-error 保证不影响主流程。
+      # ============================================================
+      - name: Diagnose target-libbacktrace configure failure
+        continue-on-error: true
+        run: |
+          NDK_SYSROOT="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+          DIAG_DIR="$BUILD_DIR/aarch64-linux-android/libbacktrace-diag"
+          mkdir -p "$DIAG_DIR"
+          cd "$DIAG_DIR"
+
+          echo "===== 手动触发 target-libbacktrace configure ====="
+          "$SRC_DIR/gcc-${GCC_VERSION}/libbacktrace/configure" \
+            --host="$TARGET" \
+            --target="$TARGET" \
+            --build="x86_64-pc-linux-gnu" \
+            --prefix="$PREFIX" \
+            CC="$BUILD_DIR/gcc/xgcc -B$BUILD_DIR/gcc/ --sysroot=$NDK_SYSROOT" \
+            CFLAGS="-g -O2 -include $PREDEF_HEADER" \
+            LDFLAGS="" \
+            2>&1 | tee /tmp/libbacktrace-diag.log || true
+
+          echo ""
+          echo "===== config.log 尾部 150 行 ====="
+          tail -150 config.log 2>/dev/null || echo "(config.log 不存在)"
+
+          echo ""
+          echo "===== 手动重现：xgcc 链接一个最小程序 ====="
+          cat > /tmp/t3.c <<'EOF'
+          int main(void){return 0;}
+          EOF
+          "$BUILD_DIR/gcc/xgcc" -B"$BUILD_DIR/gcc/" \
+            --sysroot="$NDK_SYSROOT" \
+            -include "$PREDEF_HEADER" \
+            -o /tmp/t3 /tmp/t3.c -v 2>&1 | tail -60 || true
+          ls -la /tmp/t3 2>/dev/null || echo "(t3 不可执行)"
+
+          echo ""
+          echo "===== NDK sysroot lib 目录内容（crt* 和 libc）====="
+          ls -la "$NDK_SYSROOT/usr/lib/aarch64-linux-android/24/" 2>/dev/null | head -30 || echo "(24 目录不存在)"
+          echo "---"
+          ls -la "$NDK_SYSROOT/usr/lib/aarch64-linux-android/" 2>/dev/null | head -30 || echo "(aarch64 目录不存在)"
+
+          echo ""
+          echo "===== xgcc 的 specs 里 linker 相关行 ====="
+          "$BUILD_DIR/gcc/xgcc" -dumpspecs 2>/dev/null | grep -A2 -B2 "crt1\|crti\|crtbegin" | head -40 || true
+
       - name: Build all-gcc (Fortran frontend)
         run: |
           set -euo pipefail
@@ -357,10 +413,6 @@ jobs:
           which aarch64-linux-android-ar || echo "(ar 找不到)"
           which aarch64-linux-android-ranlib || echo "(ranlib 找不到)"
           echo "PATH=$PATH"
-          echo ""
-          echo "=== 检查系统 gcc 未被劫持 ==="
-          which gcc
-          gcc --version | head -1
 
       - name: Build target-libgfortran
         if: success()
