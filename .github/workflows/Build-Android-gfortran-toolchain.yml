@@ -226,16 +226,21 @@ jobs:
           rm -f gcc.tar.xz
 
       # ============================================================
-      # ★ 工具 wrappers（含 target 前缀别名，修复 r23+ NDK 缺工具名）
+      # 工具 wrappers
+      #   - $WRAP 不进 PATH（避免劫持系统 gcc/as/ld）
+      #   - 只把 target 前缀别名单独目录进 PATH
+      #   - 不创建 $WRAP/gcc（无用的 wrapper，容易闯祸）
       # ============================================================
       - name: Create tool wrappers
         run: |
           set -euo pipefail
           NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
           WRAP=/tmp/gcc-tools
-          mkdir -p "$WRAP"
+          TARGET_BIN="$WRAP/target-bin"
+          mkdir -p "$WRAP" "$TARGET_BIN"
           CLANG_TARGET="aarch64-linux-android${API_LEVEL}"
 
+          # as wrapper（显式 --with-as 用，不进 PATH）
           cat > "$WRAP/as" <<EOF
           #!/bin/bash
           out=""; input=""
@@ -259,36 +264,33 @@ jobs:
           EOF
           chmod +x "$WRAP/as"
 
+          # ld wrapper（显式 --with-ld 用，不进 PATH）
           cat > "$WRAP/ld" <<EOF
           #!/bin/bash
           exec "${NDK_BIN}/clang" --target=${CLANG_TARGET} "\$@"
           EOF
           chmod +x "$WRAP/ld"
 
-          cat > "$WRAP/gcc" <<EOF
-          #!/bin/bash
-          exec "${NDK_BIN}/clang" --target=${CLANG_TARGET} "\$@"
-          EOF
-          chmod +x "$WRAP/gcc"
-
-          # 通用工具（无前缀）
+          # 通用工具别名（显式 --with-ar 等用，不进 PATH）
           ln -sf "${NDK_BIN}/llvm-ar"      "$WRAP/ar"
           ln -sf "${NDK_BIN}/llvm-ranlib"  "$WRAP/ranlib"
           ln -sf "${NDK_BIN}/llvm-nm"      "$WRAP/nm"
           ln -sf "${NDK_BIN}/llvm-strip"   "$WRAP/strip"
           ln -sf "${NDK_BIN}/llvm-objcopy" "$WRAP/objcopy"
 
-          # ★ target 前缀别名（NDK r23+ 移除了这些名字）
-          ln -sf "${NDK_BIN}/llvm-ar"      "$WRAP/${TARGET}-ar"
-          ln -sf "${NDK_BIN}/llvm-ranlib"  "$WRAP/${TARGET}-ranlib"
-          ln -sf "${NDK_BIN}/llvm-nm"      "$WRAP/${TARGET}-nm"
-          ln -sf "${NDK_BIN}/llvm-strip"   "$WRAP/${TARGET}-strip"
-          ln -sf "${NDK_BIN}/llvm-objcopy" "$WRAP/${TARGET}-objcopy"
+          # ★ target 前缀别名，单独目录，只把这个目录加 PATH
+          ln -sf "${NDK_BIN}/llvm-ar"      "$TARGET_BIN/${TARGET}-ar"
+          ln -sf "${NDK_BIN}/llvm-ranlib"  "$TARGET_BIN/${TARGET}-ranlib"
+          ln -sf "${NDK_BIN}/llvm-nm"      "$TARGET_BIN/${TARGET}-nm"
+          ln -sf "${NDK_BIN}/llvm-strip"   "$TARGET_BIN/${TARGET}-strip"
+          ln -sf "${NDK_BIN}/llvm-objcopy" "$TARGET_BIN/${TARGET}-objcopy"
 
-          # ★ 加 PATH，让 make 里裸命令 aarch64-linux-android-ar 也能命中
-          echo "$WRAP" >> $GITHUB_PATH
+          echo "$TARGET_BIN" >> $GITHUB_PATH
 
+          echo "--- $WRAP（不进 PATH）---"
           ls -la "$WRAP"
+          echo "--- $TARGET_BIN（进 PATH，仅含 ${TARGET}-* 别名）---"
+          ls -la "$TARGET_BIN"
 
       - name: Configure GCC
         run: |
@@ -370,10 +372,14 @@ jobs:
             ls -la /tmp/t2.o 2>/dev/null || echo "(no .o)"
           fi
           echo ""
-          echo "=== 检查 target 前缀工具是否存在 ==="
+          echo "=== 检查 target 前缀工具 ==="
           which aarch64-linux-android-ar || echo "(ar 找不到)"
           which aarch64-linux-android-ranlib || echo "(ranlib 找不到)"
           echo "PATH=$PATH"
+          echo ""
+          echo "=== 检查系统 gcc 未被劫持 ==="
+          which gcc
+          gcc --version | head -1
 
       - name: Build target-libgfortran
         if: success()
