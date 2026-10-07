@@ -70,18 +70,50 @@ jobs:
           }
           "$NDK_BIN/aarch64-linux-android${API_LEVEL}-clang" --version | head -2
 
-      - name: Fix NDK header layout for GCC
+      # ============================================================
+      # 修复 NDK：
+      #   1) asm/bits 符号链接
+      #   2) 造 glibc 风格 crt 存根（crt1.o / crti.o / crtn.o）
+      #      NDK 只提供 crtbegin_dynamic.o 等，autoconf 项目
+      #      （如 libbacktrace）默认找 glibc 名字，找不到就 exit 77。
+      # ============================================================
+      - name: Fix NDK header layout and add glibc-style crt stubs
         run: |
           set -euo pipefail
           NDK_SYSROOT="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+          NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
           ARCH_DIR="aarch64-linux-android"
+          CRT_DIR="$NDK_SYSROOT/usr/lib/${ARCH_DIR}/${API_LEVEL}"
+          CLANG="$NDK_BIN/${ARCH_DIR}${API_LEVEL}-clang"
 
+          # ---- 1. asm / bits 符号链接 ----
           for sub in asm bits; do
             if [ -d "$NDK_SYSROOT/usr/include/$ARCH_DIR/$sub" ] && [ ! -e "$NDK_SYSROOT/usr/include/$sub" ]; then
               ln -s "$ARCH_DIR/$sub" "$NDK_SYSROOT/usr/include/$sub"
             fi
           done
           ls -la "$NDK_SYSROOT/usr/include/asm/types.h" 2>/dev/null || echo "⚠️ asm/types.h 缺失"
+
+          # ---- 2. glibc 风格 crt 存根 ----
+          [ -d "$CRT_DIR" ] || { echo "::error::$CRT_DIR 不存在"; exit 1; }
+
+          echo "--- crt 存根前：$CRT_DIR 内容 ---"
+          ls "$CRT_DIR" | head -20
+
+          # crt1.o 需要 _start，否则 --no-undefined 会报未定义符号
+          cat > /tmp/crt1_stub.c <<'EOF'
+          void _start(void) { }
+          EOF
+          "$CLANG" -c /tmp/crt1_stub.c -o "$CRT_DIR/crt1.o"
+
+          echo 'void _dummy_crti(void) { }' > /tmp/crti_stub.c
+          "$CLANG" -c /tmp/crti_stub.c -o "$CRT_DIR/crti.o"
+
+          echo 'void _dummy_crtn(void) { }' > /tmp/crtn_stub.c
+          "$CLANG" -c /tmp/crtn_stub.c -o "$CRT_DIR/crtn.o"
+
+          echo "--- crt 存根后 ---"
+          ls -la "$CRT_DIR"/crt1.o "$CRT_DIR"/crti.o "$CRT_DIR"/crtn.o
 
       - name: Strip NDK availability annotations for GCC
         run: |
@@ -264,6 +296,12 @@ jobs:
           ls -la "$WRAP"
           ls -la "$TARGET_BIN"
 
+      # ============================================================
+      # Configure GCC
+      #   撤销 --disable-libbacktrace（crt 存根已让其 configure 能过）
+      #   保留其他 disable（libvtv/libphobos/libitm/liboffloadmic 是
+      #   真的不需要，不影响 cc1-checksum）
+      # ============================================================
       - name: Configure GCC
         run: |
           set -euo pipefail
@@ -288,7 +326,6 @@ jobs:
             --disable-libatomic \
             --disable-libsanitizer \
             --disable-libstdcxx \
-            --disable-libbacktrace \
             --disable-libvtv \
             --disable-libphobos \
             --disable-libitm \
@@ -315,66 +352,6 @@ jobs:
             exit 1
           }
           echo "✅ configure 完成"
-
-      # ============================================================
-      # host 端 libbacktrace 占位文件
-      #   --disable-libbacktrace 同时禁 host + target，但 cc1-checksum.cc
-      #   硬编码依赖 host 端 libbacktrace.a。建空文件骗过 make。
-      # ============================================================
-      - name: Workaround libbacktrace host dependency
-        run: |
-          set -euo pipefail
-          mkdir -p "$BUILD_DIR/libbacktrace/.libs"
-          : > "$BUILD_DIR/libbacktrace/.libs/libbacktrace.a"
-          ls -la "$BUILD_DIR/libbacktrace/.libs/"
-
-      # ============================================================
-      # ★ 诊断：手动跑一次 target-libbacktrace 的 configure，
-      #   dump config.log + 手动链接测试。continue-on-error 保证不影响主流程。
-      # ============================================================
-      - name: Diagnose target-libbacktrace configure failure
-        continue-on-error: true
-        run: |
-          NDK_SYSROOT="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
-          DIAG_DIR="$BUILD_DIR/aarch64-linux-android/libbacktrace-diag"
-          mkdir -p "$DIAG_DIR"
-          cd "$DIAG_DIR"
-
-          echo "===== 手动触发 target-libbacktrace configure ====="
-          "$SRC_DIR/gcc-${GCC_VERSION}/libbacktrace/configure" \
-            --host="$TARGET" \
-            --target="$TARGET" \
-            --build="x86_64-pc-linux-gnu" \
-            --prefix="$PREFIX" \
-            CC="$BUILD_DIR/gcc/xgcc -B$BUILD_DIR/gcc/ --sysroot=$NDK_SYSROOT" \
-            CFLAGS="-g -O2 -include $PREDEF_HEADER" \
-            LDFLAGS="" \
-            2>&1 | tee /tmp/libbacktrace-diag.log || true
-
-          echo ""
-          echo "===== config.log 尾部 150 行 ====="
-          tail -150 config.log 2>/dev/null || echo "(config.log 不存在)"
-
-          echo ""
-          echo "===== 手动重现：xgcc 链接一个最小程序 ====="
-          cat > /tmp/t3.c <<'EOF'
-          int main(void){return 0;}
-          EOF
-          "$BUILD_DIR/gcc/xgcc" -B"$BUILD_DIR/gcc/" \
-            --sysroot="$NDK_SYSROOT" \
-            -include "$PREDEF_HEADER" \
-            -o /tmp/t3 /tmp/t3.c -v 2>&1 | tail -60 || true
-          ls -la /tmp/t3 2>/dev/null || echo "(t3 不可执行)"
-
-          echo ""
-          echo "===== NDK sysroot lib 目录内容（crt* 和 libc）====="
-          ls -la "$NDK_SYSROOT/usr/lib/aarch64-linux-android/24/" 2>/dev/null | head -30 || echo "(24 目录不存在)"
-          echo "---"
-          ls -la "$NDK_SYSROOT/usr/lib/aarch64-linux-android/" 2>/dev/null | head -30 || echo "(aarch64 目录不存在)"
-
-          echo ""
-          echo "===== xgcc 的 specs 里 linker 相关行 ====="
-          "$BUILD_DIR/gcc/xgcc" -dumpspecs 2>/dev/null | grep -A2 -B2 "crt1\|crti\|crtbegin" | head -40 || true
 
       - name: Build all-gcc (Fortran frontend)
         run: |
