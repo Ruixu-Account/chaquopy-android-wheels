@@ -70,9 +70,6 @@ jobs:
           }
           "$NDK_BIN/aarch64-linux-android${API_LEVEL}-clang" --version | head -2
 
-      # ============================================================
-      # 修复 1：NDK 头文件布局（asm/bits 符号链接）
-      # ============================================================
       - name: Fix NDK header layout for GCC
         run: |
           set -euo pipefail
@@ -86,9 +83,6 @@ jobs:
           done
           ls -la "$NDK_SYSROOT/usr/include/asm/types.h" 2>/dev/null || echo "⚠️ asm/types.h 缺失"
 
-      # ============================================================
-      # 修复 2：物理删除 availability 调用点（保留 #define 行）
-      # ============================================================
       - name: Strip NDK availability annotations for GCC
         run: |
           set -euo pipefail
@@ -98,30 +92,20 @@ jobs:
           echo "=== 调用点数量（before）==="
           grep -rE "__INTRODUCED_IN|__DEPRECATED_IN|__REMOVED_IN" "$INCLUDE_DIR" 2>/dev/null | wc -l || true
 
-          echo ""
-          echo "=== [1/2] 打碎 availability 调用（含后缀变体）==="
           find "$INCLUDE_DIR" -type f \( -name '*.h' -o -name '*.hpp' \) -print0 | \
             xargs -0 -n 100 sed -i -E \
               -e '/^[[:space:]]*#/!s/__INTRODUCED_IN[A-Z_]*\([^)]*\)/ /g' \
               -e '/^[[:space:]]*#/!s/__DEPRECATED_IN[A-Z_]*\([^)]*\)/ /g' \
               -e '/^[[:space:]]*#/!s/__REMOVED_IN[A-Z_]*\([^)]*\)/ /g'
 
-          echo ""
-          echo "=== [2/2] 删除 bits/ioctl.h 里 clang 特有的重载声明 ==="
           IOCTL_H="$INCLUDE_DIR/bits/ioctl.h"
           if [ -f "$IOCTL_H" ]; then
             sed -i -E '/__overloadable/d' "$IOCTL_H"
-            echo "--- ioctl.h 处理后内容（35-60 行）---"
-            sed -n '35,60p' "$IOCTL_H"
           fi
 
-          echo ""
           echo "=== 调用点数量（after）==="
           grep -rE "__INTRODUCED_IN|__DEPRECATED_IN|__REMOVED_IN" "$INCLUDE_DIR" 2>/dev/null | wc -l || true
 
-      # ============================================================
-      # 兜底 predef header
-      # ============================================================
       - name: Create GCC predef header
         run: |
           cat > "$PREDEF_HEADER" <<'EOF'
@@ -225,12 +209,6 @@ jobs:
           tar -xf gcc.tar.xz
           rm -f gcc.tar.xz
 
-      # ============================================================
-      # 工具 wrappers
-      #   - $WRAP 不进 PATH（避免劫持系统 gcc/as/ld）
-      #   - 只把 target 前缀别名单独目录进 PATH
-      #   - 不创建 $WRAP/gcc（无用的 wrapper，容易闯祸）
-      # ============================================================
       - name: Create tool wrappers
         run: |
           set -euo pipefail
@@ -240,7 +218,6 @@ jobs:
           mkdir -p "$WRAP" "$TARGET_BIN"
           CLANG_TARGET="aarch64-linux-android${API_LEVEL}"
 
-          # as wrapper（显式 --with-as 用，不进 PATH）
           cat > "$WRAP/as" <<EOF
           #!/bin/bash
           out=""; input=""
@@ -264,21 +241,18 @@ jobs:
           EOF
           chmod +x "$WRAP/as"
 
-          # ld wrapper（显式 --with-ld 用，不进 PATH）
           cat > "$WRAP/ld" <<EOF
           #!/bin/bash
           exec "${NDK_BIN}/clang" --target=${CLANG_TARGET} "\$@"
           EOF
           chmod +x "$WRAP/ld"
 
-          # 通用工具别名（显式 --with-ar 等用，不进 PATH）
           ln -sf "${NDK_BIN}/llvm-ar"      "$WRAP/ar"
           ln -sf "${NDK_BIN}/llvm-ranlib"  "$WRAP/ranlib"
           ln -sf "${NDK_BIN}/llvm-nm"      "$WRAP/nm"
           ln -sf "${NDK_BIN}/llvm-strip"   "$WRAP/strip"
           ln -sf "${NDK_BIN}/llvm-objcopy" "$WRAP/objcopy"
 
-          # ★ target 前缀别名，单独目录，只把这个目录加 PATH
           ln -sf "${NDK_BIN}/llvm-ar"      "$TARGET_BIN/${TARGET}-ar"
           ln -sf "${NDK_BIN}/llvm-ranlib"  "$TARGET_BIN/${TARGET}-ranlib"
           ln -sf "${NDK_BIN}/llvm-nm"      "$TARGET_BIN/${TARGET}-nm"
@@ -287,11 +261,13 @@ jobs:
 
           echo "$TARGET_BIN" >> $GITHUB_PATH
 
-          echo "--- $WRAP（不进 PATH）---"
           ls -la "$WRAP"
-          echo "--- $TARGET_BIN（进 PATH，仅含 ${TARGET}-* 别名）---"
           ls -la "$TARGET_BIN"
 
+      # ============================================================
+      # Configure GCC
+      #   ★ 新增 --disable-libbacktrace 等 5 项，避免构建无关 target 库
+      # ============================================================
       - name: Configure GCC
         run: |
           set -euo pipefail
@@ -316,6 +292,11 @@ jobs:
             --disable-libatomic \
             --disable-libsanitizer \
             --disable-libstdcxx \
+            --disable-libbacktrace \
+            --disable-libvtv \
+            --disable-libphobos \
+            --disable-libitm \
+            --disable-liboffloadmic \
             --disable-nls \
             --disable-werror \
             --with-sysroot="$NDK_SYSROOT" \
