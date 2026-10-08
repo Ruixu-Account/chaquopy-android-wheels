@@ -74,8 +74,6 @@ jobs:
       # 修复 NDK：
       #   1) asm/bits 符号链接
       #   2) 造 glibc 风格 crt 存根（crt1.o / crti.o / crtn.o）
-      #      NDK 只提供 crtbegin_dynamic.o 等，autoconf 项目
-      #      （如 libbacktrace）默认找 glibc 名字，找不到就 exit 77。
       # ============================================================
       - name: Fix NDK header layout and add glibc-style crt stubs
         run: |
@@ -86,7 +84,6 @@ jobs:
           CRT_DIR="$NDK_SYSROOT/usr/lib/${ARCH_DIR}/${API_LEVEL}"
           CLANG="$NDK_BIN/${ARCH_DIR}${API_LEVEL}-clang"
 
-          # ---- 1. asm / bits 符号链接 ----
           for sub in asm bits; do
             if [ -d "$NDK_SYSROOT/usr/include/$ARCH_DIR/$sub" ] && [ ! -e "$NDK_SYSROOT/usr/include/$sub" ]; then
               ln -s "$ARCH_DIR/$sub" "$NDK_SYSROOT/usr/include/$sub"
@@ -94,13 +91,8 @@ jobs:
           done
           ls -la "$NDK_SYSROOT/usr/include/asm/types.h" 2>/dev/null || echo "⚠️ asm/types.h 缺失"
 
-          # ---- 2. glibc 风格 crt 存根 ----
           [ -d "$CRT_DIR" ] || { echo "::error::$CRT_DIR 不存在"; exit 1; }
 
-          echo "--- crt 存根前：$CRT_DIR 内容 ---"
-          ls "$CRT_DIR" | head -20
-
-          # crt1.o 需要 _start，否则 --no-undefined 会报未定义符号
           cat > /tmp/crt1_stub.c <<'EOF'
           void _start(void) { }
           EOF
@@ -112,7 +104,7 @@ jobs:
           echo 'void _dummy_crtn(void) { }' > /tmp/crtn_stub.c
           "$CLANG" -c /tmp/crtn_stub.c -o "$CRT_DIR/crtn.o"
 
-          echo "--- crt 存根后 ---"
+          echo "--- crt 存根已创建 ---"
           ls -la "$CRT_DIR"/crt1.o "$CRT_DIR"/crti.o "$CRT_DIR"/crtn.o
 
       - name: Strip NDK availability annotations for GCC
@@ -298,9 +290,8 @@ jobs:
 
       # ============================================================
       # Configure GCC
-      #   撤销 --disable-libbacktrace（crt 存根已让其 configure 能过）
-      #   保留其他 disable（libvtv/libphobos/libitm/liboffloadmic 是
-      #   真的不需要，不影响 cc1-checksum）
+      #   - 撤销 --disable-libbacktrace（crt 存根应能过 configure）
+      #   - 保留其他 disable（libvtv/libphobos/libitm/liboffloadmic）
       # ============================================================
       - name: Configure GCC
         run: |
@@ -358,6 +349,45 @@ jobs:
           set -euo pipefail
           cd "$BUILD_DIR"
           make -j"$(nproc)" all-gcc 2>&1 | tee /tmp/gcc-build-gcc.log
+
+      # ============================================================
+      # ★ 诊断：xgcc 已经存在了，这次能拿到真实链接错误
+      # ============================================================
+      - name: Diagnose libbacktrace link failure
+        continue-on-error: true
+        run: |
+          set -x
+          NDK_SYSROOT="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+          XGCC="$BUILD_DIR/gcc/xgcc"
+
+          echo "===== 1. xgcc 直接链接一个最小程序 ====="
+          cat > /tmp/t3.c <<'EOF'
+          int main(void){return 0;}
+          EOF
+          "$XGCC" -B"$BUILD_DIR/gcc/" \
+            --sysroot="$NDK_SYSROOT" \
+            -include "$PREDEF_HEADER" \
+            -o /tmp/t3 /tmp/t3.c -v 2>&1 | tail -80 || true
+          echo "--- t3 存在？---"
+          ls -la /tmp/t3 2>/dev/null || echo "(t3 未生成)"
+
+          echo ""
+          echo "===== 2. libbacktrace config.log 最后 100 行 ====="
+          tail -100 "$BUILD_DIR/aarch64-linux-android/libbacktrace/config.log" 2>/dev/null || echo "(无 config.log)"
+
+          echo ""
+          echo "===== 3. xgcc specs 里 linker 相关行 ====="
+          "$XGCC" -dumpspecs 2>/dev/null | grep -nE "crt1|crti|crtn|crtbegin|startfile|endfile" | head -40 || true
+
+          echo ""
+          echo "===== 4. xgcc 找 startup 文件的实际路径 ====="
+          "$XGCC" -print-file-name=crt1.o 2>&1 || true
+          "$XGCC" -print-file-name=crti.o 2>&1 || true
+          "$XGCC" -print-file-name=crtbegin.o 2>&1 || true
+
+          echo ""
+          echo "===== 5. 我们造的存根 ====="
+          ls -la "$NDK_SYSROOT/usr/lib/aarch64-linux-android/24/crt"*.o 2>/dev/null || echo "(无存根)"
 
       - name: Build target-libgcc
         run: |
