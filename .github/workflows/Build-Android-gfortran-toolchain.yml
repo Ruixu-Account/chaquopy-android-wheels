@@ -70,9 +70,6 @@ jobs:
           }
           "$NDK_BIN/aarch64-linux-android${API_LEVEL}-clang" --version | head -2
 
-      # ============================================================
-      # 修复 NDK：asm/bits 符号链接 + glibc 风格 crt 存根
-      # ============================================================
       - name: Fix NDK header layout and add glibc-style crt stubs
         run: |
           set -euo pipefail
@@ -233,8 +230,11 @@ jobs:
 
       # ============================================================
       # 工具 wrappers
-      #   ld wrapper 关键变化：过滤 GNU ld 特有参数 + glibc crt 文件，
-      #   让 clang driver 自己处理 NDK 启动文件和 libc。
+      #   ld wrapper：
+      #     - 过滤 GNU ld 特有参数
+      #     - 过滤 crt*.o（通配，兼容完整路径）
+      #     - 过滤 -lgcc_s / -lpthread / -lrt / -ldl（bionic 里合并进 libc）
+      #     - 保留 -lgcc（这是我们编出来的 libgcc.a）
       # ============================================================
       - name: Create tool wrappers
         run: |
@@ -269,24 +269,30 @@ jobs:
           EOF
           chmod +x "$WRAP/as"
 
-          # ld wrapper：过滤 GNU ld 参数 + crt 文件
+          # ld wrapper
           cat > "$WRAP/ld" <<EOF
           #!/bin/bash
           ARGS=()
           while [ \$# -gt 0 ]; do
             case "\$1" in
-              -maarch64linux|-EL|-EB|-X)
+              # --- GNU ld 特有开关 ---
+              -maarch64linux|-EL|-EB|-X|-V)
                 shift ;;
               -dynamic-linker)
                 shift 2 ;;
               -dynamic-linker=*)
                 shift ;;
-              crt1.o|crti.o|crtn.o|crtbegin.o|crtbeginS.o|crtbeginT.o|crtend.o|crtendS.o)
+              # --- glibc 风格 crt 启动文件（通配，兼容完整路径）---
+              *crt1.o|*crti.o|*crtn.o|*crtbegin.o|*crtbeginS.o|*crtbeginT.o|*crtend.o|*crtendS.o)
                 shift ;;
-              gcrt1.o|Scrt1.o|rcrt1.o|grcrt1.o)
+              *Scrt1.o|*rcrt1.o|*gcrt1.o|*grcrt1.o|*crtfastmath.o)
                 shift ;;
-              crtfastmath.o)
+              # --- glibc 特有库，bionic 里合并进 libc ---
+              -lgcc_s)
                 shift ;;
+              -lpthread|-lrt|-ldl)
+                shift ;;
+              # --- 保留 -lgcc（这是我们编出来的 libgcc.a）---
               *)
                 ARGS+=("\$1")
                 shift ;;
@@ -370,9 +376,6 @@ jobs:
           cd "$BUILD_DIR"
           make -j"$(nproc)" all-gcc 2>&1 | tee /tmp/gcc-build-gcc.log
 
-      # ============================================================
-      # 诊断：xgcc 已存在时链接最小程序
-      # ============================================================
       - name: Diagnose libbacktrace link failure
         continue-on-error: true
         run: |
@@ -380,20 +383,15 @@ jobs:
           NDK_SYSROOT="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
           XGCC="$BUILD_DIR/gcc/xgcc"
 
-          echo "===== 1. xgcc 直接链接一个最小程序 ====="
+          echo "===== xgcc 链接一个最小程序 ====="
           cat > /tmp/t3.c <<'EOF'
           int main(void){return 0;}
           EOF
           "$XGCC" -B"$BUILD_DIR/gcc/" \
             --sysroot="$NDK_SYSROOT" \
             -include "$PREDEF_HEADER" \
-            -o /tmp/t3 /tmp/t3.c -v 2>&1 | tail -80 || true
-          echo "--- t3 存在？---"
+            -o /tmp/t3 /tmp/t3.c -v 2>&1 | tail -60 || true
           ls -la /tmp/t3 2>/dev/null || echo "(t3 未生成)"
-
-          echo ""
-          echo "===== 2. libbacktrace config.log 最后 100 行 ====="
-          tail -100 "$BUILD_DIR/aarch64-linux-android/libbacktrace/config.log" 2>/dev/null || echo "(无 config.log)"
 
       - name: Build target-libgcc
         run: |
@@ -409,7 +407,6 @@ jobs:
           LOG="$BUILD_DIR/aarch64-linux-android/libgcc/config.log"
           [ -f "$LOG" ] && { echo "=== config.log 尾部 200 行 ==="; tail -200 "$LOG"; }
           echo ""
-          echo "=== 手动测试 ==="
           XGCC="$BUILD_DIR/gcc/xgcc"
           if [ -x "$XGCC" ]; then
             cat > /tmp/t2.c <<'EOF'
@@ -419,7 +416,6 @@ jobs:
           EOF
             "$XGCC" -B"$BUILD_DIR/gcc/" -include "$PREDEF_HEADER" \
               -c /tmp/t2.c -o /tmp/t2.o -v 2>&1 | tail -60 || true
-            ls -la /tmp/t2.o 2>/dev/null || echo "(no .o)"
           fi
 
       - name: Build target-libgfortran
@@ -479,15 +475,15 @@ jobs:
         if: success()
         run: |
           cd "$PREFIX"
-          tar -czf /tmp/gfortran-android-arm64.tar.gz .
-          ls -la /tmp/gfortran-android-arm64.tar.gz
+          tar -czf /tmp/gfortran-arm64.tar.gz .
+          ls -la /tmp/gfortran-arm64.tar.gz
 
       - name: Upload artifact
         if: success()
         uses: actions/upload-artifact@v4
         with:
           name: gfortran-android-arm64-gcc${{ env.GCC_VERSION }}
-          path: /tmp/gfortran-android-arm64.tar.gz
+          path: /tmp/gfortran-arm64.tar.gz
           retention-days: 90
 
       - name: Upload to GitHub Release
@@ -499,7 +495,7 @@ jobs:
           body: |
             Cross gfortran toolchain for Android `aarch64-linux-android`, API ${{ env.API_LEVEL }}.
             Built from GCC ${{ env.GCC_VERSION }} + NDK r27c (${{ env.NDK_VERSION }}).
-          files: /tmp/gfortran-android-arm64.tar.gz
+          files: /tmp/gfortran-arm64.tar.gz
           make_latest: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -509,5 +505,5 @@ jobs:
         run: |
           echo "## ✅ gfortran toolchain built" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "https://github.com/${{ github.repository }}/releases/download/toolchain-gfortran/gfortran-android-arm64.tar.gz" >> $GITHUB_STEP_SUMMARY
+          echo "https://github.com/${{ github.repository }}/releases/download/toolchain-gfortran/gfortran-arm64.tar.gz" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
