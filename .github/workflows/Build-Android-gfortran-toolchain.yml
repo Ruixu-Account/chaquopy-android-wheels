@@ -71,9 +71,7 @@ jobs:
           "$NDK_BIN/aarch64-linux-android${API_LEVEL}-clang" --version | head -2
 
       # ============================================================
-      # 修复 NDK：
-      #   1) asm/bits 符号链接
-      #   2) 造 glibc 风格 crt 存根（crt1.o / crti.o / crtn.o）
+      # 修复 NDK：asm/bits 符号链接 + glibc 风格 crt 存根
       # ============================================================
       - name: Fix NDK header layout and add glibc-style crt stubs
         run: |
@@ -233,6 +231,11 @@ jobs:
           tar -xf gcc.tar.xz
           rm -f gcc.tar.xz
 
+      # ============================================================
+      # 工具 wrappers
+      #   ld wrapper 关键变化：过滤 GNU ld 特有参数 + glibc crt 文件，
+      #   让 clang driver 自己处理 NDK 启动文件和 libc。
+      # ============================================================
       - name: Create tool wrappers
         run: |
           set -euo pipefail
@@ -242,6 +245,7 @@ jobs:
           mkdir -p "$WRAP" "$TARGET_BIN"
           CLANG_TARGET="aarch64-linux-android${API_LEVEL}"
 
+          # as wrapper
           cat > "$WRAP/as" <<EOF
           #!/bin/bash
           out=""; input=""
@@ -265,9 +269,30 @@ jobs:
           EOF
           chmod +x "$WRAP/as"
 
+          # ld wrapper：过滤 GNU ld 参数 + crt 文件
           cat > "$WRAP/ld" <<EOF
           #!/bin/bash
-          exec "${NDK_BIN}/clang" --target=${CLANG_TARGET} "\$@"
+          ARGS=()
+          while [ \$# -gt 0 ]; do
+            case "\$1" in
+              -maarch64linux|-EL|-EB|-X)
+                shift ;;
+              -dynamic-linker)
+                shift 2 ;;
+              -dynamic-linker=*)
+                shift ;;
+              crt1.o|crti.o|crtn.o|crtbegin.o|crtbeginS.o|crtbeginT.o|crtend.o|crtendS.o)
+                shift ;;
+              gcrt1.o|Scrt1.o|rcrt1.o|grcrt1.o)
+                shift ;;
+              crtfastmath.o)
+                shift ;;
+              *)
+                ARGS+=("\$1")
+                shift ;;
+            esac
+          done
+          exec "${NDK_BIN}/clang" --target=${CLANG_TARGET} "\${ARGS[@]}"
           EOF
           chmod +x "$WRAP/ld"
 
@@ -288,11 +313,6 @@ jobs:
           ls -la "$WRAP"
           ls -la "$TARGET_BIN"
 
-      # ============================================================
-      # Configure GCC
-      #   - 撤销 --disable-libbacktrace（crt 存根应能过 configure）
-      #   - 保留其他 disable（libvtv/libphobos/libitm/liboffloadmic）
-      # ============================================================
       - name: Configure GCC
         run: |
           set -euo pipefail
@@ -351,7 +371,7 @@ jobs:
           make -j"$(nproc)" all-gcc 2>&1 | tee /tmp/gcc-build-gcc.log
 
       # ============================================================
-      # ★ 诊断：xgcc 已经存在了，这次能拿到真实链接错误
+      # 诊断：xgcc 已存在时链接最小程序
       # ============================================================
       - name: Diagnose libbacktrace link failure
         continue-on-error: true
@@ -375,20 +395,6 @@ jobs:
           echo "===== 2. libbacktrace config.log 最后 100 行 ====="
           tail -100 "$BUILD_DIR/aarch64-linux-android/libbacktrace/config.log" 2>/dev/null || echo "(无 config.log)"
 
-          echo ""
-          echo "===== 3. xgcc specs 里 linker 相关行 ====="
-          "$XGCC" -dumpspecs 2>/dev/null | grep -nE "crt1|crti|crtn|crtbegin|startfile|endfile" | head -40 || true
-
-          echo ""
-          echo "===== 4. xgcc 找 startup 文件的实际路径 ====="
-          "$XGCC" -print-file-name=crt1.o 2>&1 || true
-          "$XGCC" -print-file-name=crti.o 2>&1 || true
-          "$XGCC" -print-file-name=crtbegin.o 2>&1 || true
-
-          echo ""
-          echo "===== 5. 我们造的存根 ====="
-          ls -la "$NDK_SYSROOT/usr/lib/aarch64-linux-android/24/crt"*.o 2>/dev/null || echo "(无存根)"
-
       - name: Build target-libgcc
         run: |
           set -euo pipefail
@@ -403,7 +409,7 @@ jobs:
           LOG="$BUILD_DIR/aarch64-linux-android/libgcc/config.log"
           [ -f "$LOG" ] && { echo "=== config.log 尾部 200 行 ==="; tail -200 "$LOG"; }
           echo ""
-          echo "=== 手动测试：含系统头文件的 C 编译 ==="
+          echo "=== 手动测试 ==="
           XGCC="$BUILD_DIR/gcc/xgcc"
           if [ -x "$XGCC" ]; then
             cat > /tmp/t2.c <<'EOF'
@@ -415,11 +421,6 @@ jobs:
               -c /tmp/t2.c -o /tmp/t2.o -v 2>&1 | tail -60 || true
             ls -la /tmp/t2.o 2>/dev/null || echo "(no .o)"
           fi
-          echo ""
-          echo "=== 检查 target 前缀工具 ==="
-          which aarch64-linux-android-ar || echo "(ar 找不到)"
-          which aarch64-linux-android-ranlib || echo "(ranlib 找不到)"
-          echo "PATH=$PATH"
 
       - name: Build target-libgfortran
         if: success()
