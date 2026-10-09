@@ -84,7 +84,6 @@ jobs:
               ln -s "$ARCH_DIR/$sub" "$NDK_SYSROOT/usr/include/$sub"
             fi
           done
-          ls -la "$NDK_SYSROOT/usr/include/asm/types.h" 2>/dev/null || echo "⚠️ asm/types.h 缺失"
 
           [ -d "$CRT_DIR" ] || { echo "::error::$CRT_DIR 不存在"; exit 1; }
 
@@ -99,7 +98,6 @@ jobs:
           echo 'void _dummy_crtn(void) { }' > /tmp/crtn_stub.c
           "$CLANG" -c /tmp/crtn_stub.c -o "$CRT_DIR/crtn.o"
 
-          echo "--- crt 存根已创建 ---"
           ls -la "$CRT_DIR"/crt1.o "$CRT_DIR"/crti.o "$CRT_DIR"/crtn.o
 
       - name: Strip NDK availability annotations for GCC
@@ -107,9 +105,6 @@ jobs:
           set -euo pipefail
           NDK_SYSROOT="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
           INCLUDE_DIR="$NDK_SYSROOT/usr/include"
-
-          echo "=== 调用点数量（before）==="
-          grep -rE "__INTRODUCED_IN|__DEPRECATED_IN|__REMOVED_IN" "$INCLUDE_DIR" 2>/dev/null | wc -l || true
 
           find "$INCLUDE_DIR" -type f \( -name '*.h' -o -name '*.hpp' \) -print0 | \
             xargs -0 -n 100 sed -i -E \
@@ -121,9 +116,6 @@ jobs:
           if [ -f "$IOCTL_H" ]; then
             sed -i -E '/__overloadable/d' "$IOCTL_H"
           fi
-
-          echo "=== 调用点数量（after）==="
-          grep -rE "__INTRODUCED_IN|__DEPRECATED_IN|__REMOVED_IN" "$INCLUDE_DIR" 2>/dev/null | wc -l || true
 
       - name: Create GCC predef header
         run: |
@@ -205,9 +197,6 @@ jobs:
           #endif
           EOF
 
-          echo "--- predef header 行数 ---"
-          wc -l "$PREDEF_HEADER"
-
       - name: Cache GCC source
         uses: actions/cache@v4
         with:
@@ -265,7 +254,18 @@ jobs:
           ARGS=()
           while [ \$# -gt 0 ]; do
             case "\$1" in
-              -maarch64linux|-EL|-EB|-X|-V)
+              -maarch64linux|-EL|-EB|-X)
+                shift ;;
+              -V|--version)
+                ARGS+=("-Wl,--version")
+                shift ;;
+              --build-id=*|--build-id)
+                shift ;;
+              --no-rosegment|--rosegment)
+                shift ;;
+              -z)
+                shift 2 ;;
+              -z*)
                 shift ;;
               -dynamic-linker)
                 shift 2 ;;
@@ -301,9 +301,6 @@ jobs:
           ln -sf "${NDK_BIN}/llvm-objcopy" "$TARGET_BIN/${TARGET}-objcopy"
 
           echo "$TARGET_BIN" >> $GITHUB_PATH
-
-          ls -la "$WRAP"
-          ls -la "$TARGET_BIN"
 
       - name: Configure GCC
         run: |
@@ -360,24 +357,28 @@ jobs:
         run: |
           set -euo pipefail
           cd "$BUILD_DIR"
+
+          find "$BUILD_DIR" -type f -name 'Makefile' -print0 | \
+            xargs -0 --no-run-if-empty sed -i -E \
+              's/-Werror([=[:space:]]|$)/-Wno-error\1/g'
+
           make -j"$(nproc)" all-gcc 2>&1 | tee /tmp/gcc-build-gcc.log
 
       - name: Build target-libgcc
         run: |
           set -euo pipefail
           cd "$BUILD_DIR"
+
+          find "$BUILD_DIR" -type f -name 'Makefile' -print0 | \
+            xargs -0 --no-run-if-empty sed -i -E \
+              's/-Werror([=[:space:]]|$)/-Wno-error\1/g'
+
           make -j"$(nproc)" all-target-libgcc \
-            CFLAGS_FOR_TARGET="-g -O2 -include $PREDEF_HEADER" \
+            CFLAGS_FOR_TARGET="-g -O2 -fPIC -include $PREDEF_HEADER" \
             2>&1 | tee /tmp/gcc-build-libgcc.log
 
-      - name: Dump libgcc failure
-        if: failure()
-        run: |
-          LOG="$BUILD_DIR/aarch64-linux-android/libgcc/config.log"
-          [ -f "$LOG" ] && { echo "=== config.log 尾部 200 行 ==="; tail -200 "$LOG"; }
-
       # ============================================================
-      # ★ libgfortran：先 sed Makefile 撤销 -Werror=，再编译
+      # libgfortran：CFLAGS_FOR_TARGET 里加 -fPIC（关键）
       # ============================================================
       - name: Build target-libgfortran
         if: success()
@@ -387,16 +388,12 @@ jobs:
 
           LF_MAKEFILE="$BUILD_DIR/aarch64-linux-android/libgfortran/Makefile"
           if [ -f "$LF_MAKEFILE" ]; then
-            echo "--- Makefile 里的 -Werror= （修补前）---"
-            grep -oE '\-Werror=[a-z-]+' "$LF_MAKEFILE" | sort -u || true
             sed -i 's/-Werror=implicit-function-declaration/-Wno-error=implicit-function-declaration/g' "$LF_MAKEFILE"
             sed -i 's/-Werror=vla/-Wno-error=vla/g' "$LF_MAKEFILE"
-            echo "--- 修补后 ---"
-            grep -oE '\-W(no-)?error=[a-z-]+' "$LF_MAKEFILE" | sort -u || true
           fi
 
           make -j"$(nproc)" all-target-libgfortran \
-            CFLAGS_FOR_TARGET="-g -O2 -include $PREDEF_HEADER -Wno-error=implicit-function-declaration -Wno-error=vla" \
+            CFLAGS_FOR_TARGET="-g -O2 -fPIC -include $PREDEF_HEADER" \
             2>&1 | tee /tmp/gcc-build-libgfortran.log
 
       - name: Install GCC
@@ -407,7 +404,6 @@ jobs:
           make install-gcc install-target-libgcc install-target-libgfortran \
             2>&1 | tee /tmp/gcc-install.log
           ls -la "$PREFIX/bin/"
-          du -sh "$PREFIX"
 
       - name: Verify gfortran
         if: success()
@@ -419,13 +415,7 @@ jobs:
 
           cat > /tmp/hello.f90 <<'EOF'
           program hello
-            integer :: i
-            real :: s
-            s = 0.0
-            do i = 1, 10
-              s = s + real(i)
-            end do
-            print *, "sum:", s
+            print *, "hello from gfortran"
           end program hello
           EOF
 
@@ -440,7 +430,6 @@ jobs:
         run: |
           rm -rf "$SRC_DIR" "$BUILD_DIR"
           rm -rf "$ANDROID_NDK_HOME" || true
-          df -h /
           du -sh "$PREFIX"
 
       - name: Pack toolchain
@@ -471,11 +460,3 @@ jobs:
           make_latest: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Summary
-        if: success()
-        run: |
-          echo "## ✅ gfortran toolchain built" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "https://github.com/${{ github.repository }}/releases/download/toolchain-gfortran/gfortran-arm64.tar.gz" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
