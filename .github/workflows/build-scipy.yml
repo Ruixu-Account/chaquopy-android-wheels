@@ -205,10 +205,10 @@ jobs:
               - SCIPY_USE_PYTHRAN=0
           requirements:
             build:
-              - ninja
-              - meson-python
-              - cython
-              - pkgconfig
+              - ninja 1.11.1
+              - meson-python 0.18.0
+              - cython 3.10
+              - pkgconfig 1.5.5
             host:
               - python
               - numpy 2.5.3
