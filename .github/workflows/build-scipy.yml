@@ -28,6 +28,8 @@ env:
   GFORTRAN_URL: "https://github.com/Ruixu-Account/chaquopy-android-wheels/releases/download/toolchain-gfortran/gfortran-arm64.tar.gz"
   LIBGFORTRAN_URL: "https://chaquo.com/pypi-13.1/chaquopy-libgfortran/chaquopy_libgfortran-4.9-0-py3-none-android_21_arm64_v8a.whl"
   OPENBLAS_URL: "https://chaquo.com/pypi-13.1/chaquopy-openblas/chaquopy_openblas-0.2.20-5-py3-none-android_21_arm64_v8a.whl"
+  NUMPY_URL: "https://github.com/Ruixu-Account/chaquopy-android-wheels/releases/download/latest/numpy-2.5.3-0-cp312-cp312-android_24_arm64_v8a.whl"
+  NUMPY_FILENAME: "numpy-2.5.3-0-cp312-cp312-android_24_arm64_v8a.whl"
 
 jobs:
   build:
@@ -38,8 +40,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ★ 关键：用 setup-python 装的 Python 3.11/3.12，
-      #   避免系统 Python 3.12 编 PyYAML 6.0 挂掉
       - name: Setup Python (host)
         uses: actions/setup-python@v5
         with:
@@ -67,6 +67,9 @@ jobs:
         run: |
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;${NDK_VERSION}" || true
 
+      # ============================================================
+      # 下载并解压自建 gfortran 工具链
+      # ============================================================
       - name: Download and extract gfortran toolchain
         run: |
           set -euo pipefail
@@ -76,6 +79,9 @@ jobs:
           echo "/opt/android-gfortran/bin" >> $GITHUB_PATH
           /opt/android-gfortran/bin/aarch64-linux-android-gfortran --version | head -1
 
+      # ============================================================
+      # 下载 Chaquopy 预编译依赖
+      # ============================================================
       - name: Download Chaquopy prebuilt dependencies
         run: |
           set -euo pipefail
@@ -116,6 +122,29 @@ jobs:
           bash $GITHUB_WORKSPACE/scripts/inject-sysconfig.sh \
             "3.12" "${{ inputs.python_target_version }}"
 
+      # ============================================================
+      # ★ 下载自建 numpy 2.5.3 wheel 到 Chaquopy 本地索引
+      #   build-wheel.py 会优先从 dist/numpy/ 找，避免去官方源查
+      #   （官方源最高只有 1.26.2）
+      # ============================================================
+      - name: Download custom numpy wheel into Chaquopy dist
+        run: |
+          set -euo pipefail
+          NUMPY_DIR="/opt/chaquopy/server/pypi/dist/numpy"
+          mkdir -p "$NUMPY_DIR"
+          if [ -f "$NUMPY_DIR/${NUMPY_FILENAME}" ]; then
+            echo "✅ 已存在: $NUMPY_DIR/${NUMPY_FILENAME}"
+          else
+            wget -q --tries=3 --timeout=300 "${NUMPY_URL}" -O "$NUMPY_DIR/${NUMPY_FILENAME}"
+          fi
+          echo "--- dist/numpy 内容 ---"
+          ls -la "$NUMPY_DIR"
+          echo "--- dist/ 整体 ---"
+          find /opt/chaquopy/server/pypi/dist -maxdepth 2 -name "*.whl" | sort
+
+      # ============================================================
+      # 生成 Meson 交叉编译文件
+      # ============================================================
       - name: Generate Meson cross file
         run: |
           set -euo pipefail
@@ -149,6 +178,9 @@ jobs:
           echo "=== cross-file ==="
           cat "$CROSS_FILE"
 
+      # ============================================================
+      # 构建 SciPy
+      # ============================================================
       - name: Build SciPy
         run: |
           set -euo pipefail
