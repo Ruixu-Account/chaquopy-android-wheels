@@ -94,6 +94,11 @@ jobs:
           find /opt/chaquopy-deps/libgfortran -name "*.so*" -exec ls -la {} \;
           echo "--- openblas ---"
           find /opt/chaquopy-deps/openblas -name "*.so*" -exec ls -la {} \;
+          # 追加到 Download Chaquopy prebuilt dependencies 末尾
+          PYPI_DIST="/opt/chaquopy/server/pypi/dist"
+          mkdir -p "$PYPI_DIST/chaquopy-libgfortran" "$PYPI_DIST/chaquopy-openblas"
+          wget -q "${LIBGFORTRAN_URL}" -O "$PYPI_DIST/chaquopy-libgfortran/chaquopy_libgfortran-4.9-0-py3-none-android_21_arm64_v8a.whl"
+          wget -q "${OPENBLAS_URL}" -O "$PYPI_DIST/chaquopy-openblas/chaquopy_openblas-0.2.20-5-py3-none-android_21_arm64_v8a.whl"
 
       - name: Clone Chaquopy ${{ env.CHAQUOPY_VERSION }}
         run: |
