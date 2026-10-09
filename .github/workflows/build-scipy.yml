@@ -76,6 +76,79 @@ jobs:
           echo "/opt/android-gfortran/bin" >> $GITHUB_PATH
           /opt/android-gfortran/bin/aarch64-linux-android-gfortran --version | head -1
 
+      # ============================================================
+      # 重建 gfortran 编译时依赖的 ld/as wrapper
+      #   gfortran 的 spec 里硬编码了 --with-ld=/tmp/gcc-tools/ld，
+      #   但这个临时目录在上次构建后已被清理。重建它。
+      # ============================================================
+      - name: Recreate ld/as wrappers for gfortran toolchain
+        run: |
+          set -euo pipefail
+          NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          WRAP=/tmp/gcc-tools
+          mkdir -p "$WRAP"
+
+          # ld wrapper
+          cat > "$WRAP/ld" <<EOF
+          #!/bin/bash
+          ARGS=()
+          while [ \$# -gt 0 ]; do
+            case "\$1" in
+              -maarch64linux|-EL|-EB|-X|-V)
+                shift ;;
+              -dynamic-linker)
+                shift 2 ;;
+              -dynamic-linker=*)
+                shift ;;
+              *crt1.o|*crti.o|*crtn.o|*crtbegin.o|*crtbeginS.o|*crtbeginT.o|*crtend.o|*crtendS.o)
+                shift ;;
+              *Scrt1.o|*rcrt1.o|*gcrt1.o|*grcrt1.o|*crtfastmath.o)
+                shift ;;
+              -lgcc_s)
+                shift ;;
+              -lpthread|-lrt|-ldl)
+                shift ;;
+              *)
+                ARGS+=("\$1")
+                shift ;;
+            esac
+          done
+          exec "${NDK_BIN}/clang" --target=aarch64-linux-android24 "\${ARGS[@]}"
+          EOF
+          chmod +x "$WRAP/ld"
+
+          # as wrapper
+          cat > "$WRAP/as" <<EOF
+          #!/bin/bash
+          out=""; input=""
+          while [ \$# -gt 0 ]; do
+            case "\$1" in
+              -o) out="\$2"; shift 2 ;;
+              -o*) out="\${1#-o}"; shift ;;
+              *.s|*.S) input="\$1"; shift ;;
+              *) shift ;;
+            esac
+          done
+          [ -z "\$input" ] && { echo "as-wrapper: no input" >&2; exit 1; }
+          [ -z "\$out" ]   && { echo "as-wrapper: no -o" >&2; exit 1; }
+          if grep -q '\.section.*\.eh_frame,"aw"' "\$input" 2>/dev/null; then
+            sed -i -E 's/(\.section[[:space:]]+\.eh_frame),"aw"/\1,"a"/g' "\$input"
+          fi
+          if grep -q '\.section.*\.gcc_except_table,"aw"' "\$input" 2>/dev/null; then
+            sed -i -E 's/(\.section[[:space:]]+\.gcc_except_table),"aw"/\1,"a"/g' "\$input"
+          fi
+          exec "${NDK_BIN}/clang" --target=aarch64-linux-android24 -c -o "\$out" "\$input"
+          EOF
+          chmod +x "$WRAP/as"
+
+          ln -sf "${NDK_BIN}/llvm-ar"      "$WRAP/ar"
+          ln -sf "${NDK_BIN}/llvm-ranlib"  "$WRAP/ranlib"
+          ln -sf "${NDK_BIN}/llvm-nm"      "$WRAP/nm"
+          ln -sf "${NDK_BIN}/llvm-strip"   "$WRAP/strip"
+
+          echo "--- /tmp/gcc-tools 已重建 ---"
+          ls -la "$WRAP"
+
       - name: Download Chaquopy prebuilt dependencies
         run: |
           set -euo pipefail
@@ -108,9 +181,6 @@ jobs:
           python --version
           pip install -r $CHAQUOPY_ROOT/server/pypi/requirements.txt
 
-      # ============================================================
-      # 用 numpy 里实测成功的内联 patch（3 条）
-      # ============================================================
       - name: Patch Chaquopy build-wheel.py
         run: |
           python3 - <<'PY'
