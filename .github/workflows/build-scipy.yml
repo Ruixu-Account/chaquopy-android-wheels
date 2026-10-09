@@ -25,10 +25,7 @@ env:
   NDK_VERSION: "27.3.13750724"
   ANDROID_API_LEVEL: "24"
   TARGET: aarch64-linux-android
-  PREFIX: /opt/scipy-build
-  # 自建 gfortran 工具链的下载地址
   GFORTRAN_URL: "https://github.com/Ruixu-Account/chaquopy-android-wheels/releases/download/toolchain-gfortran/gfortran-arm64.tar.gz"
-  # Chaquopy 预编译依赖的下载地址
   LIBGFORTRAN_URL: "https://chaquo.com/pypi-13.1/chaquopy-libgfortran/chaquopy_libgfortran-4.9-0-py3-none-android_21_arm64_v8a.whl"
   OPENBLAS_URL: "https://chaquo.com/pypi-13.1/chaquopy-openblas/chaquopy_openblas-0.2.20-5-py3-none-android_21_arm64_v8a.whl"
 
@@ -40,6 +37,15 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # ★ 关键：用 setup-python 装的 Python 3.11/3.12，
+      #   避免系统 Python 3.12 编 PyYAML 6.0 挂掉
+      - name: Setup Python (host)
+        uses: actions/setup-python@v5
+        with:
+          python-version: |
+            3.12
+            3.11
 
       - name: Disk usage (baseline)
         run: df -h /
@@ -61,9 +67,6 @@ jobs:
         run: |
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;${NDK_VERSION}" || true
 
-      # ============================================================
-      # 下载并解压自建 gfortran 工具链
-      # ============================================================
       - name: Download and extract gfortran toolchain
         run: |
           set -euo pipefail
@@ -73,9 +76,6 @@ jobs:
           echo "/opt/android-gfortran/bin" >> $GITHUB_PATH
           /opt/android-gfortran/bin/aarch64-linux-android-gfortran --version | head -1
 
-      # ============================================================
-      # 下载 Chaquopy 预编译依赖
-      # ============================================================
       - name: Download Chaquopy prebuilt dependencies
         run: |
           set -euo pipefail
@@ -84,9 +84,9 @@ jobs:
           wget -q "${OPENBLAS_URL}" -O /tmp/openblas.whl
           unzip -q /tmp/libgfortran.whl -d /opt/chaquopy-deps/libgfortran
           unzip -q /tmp/openblas.whl -d /opt/chaquopy-deps/openblas
-          echo "--- libgfortran 内容 ---"
+          echo "--- libgfortran ---"
           find /opt/chaquopy-deps/libgfortran -name "*.so*" -exec ls -la {} \;
-          echo "--- openblas 内容 ---"
+          echo "--- openblas ---"
           find /opt/chaquopy-deps/openblas -name "*.so*" -exec ls -la {} \;
 
       - name: Clone Chaquopy ${{ env.CHAQUOPY_VERSION }}
@@ -98,6 +98,8 @@ jobs:
 
       - name: Install Chaquopy build requirements
         run: |
+          which python
+          python --version
           pip install -r $CHAQUOPY_ROOT/server/pypi/requirements.txt
 
       - name: Apply Chaquopy build-wheel.py patches
@@ -114,14 +116,10 @@ jobs:
           bash $GITHUB_WORKSPACE/scripts/inject-sysconfig.sh \
             "3.12" "${{ inputs.python_target_version }}"
 
-      # ============================================================
-      # 生成 Meson 交叉编译文件
-      # ============================================================
       - name: Generate Meson cross file
         run: |
           set -euo pipefail
           NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          NDK_SYSROOT="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
           CROSS_FILE=/tmp/android-arm64.ini
 
           cat > "$CROSS_FILE" <<EOF
@@ -148,12 +146,9 @@ jobs:
           cpp_args = ['-D__BIONIC_NO_PAGE_SIZE_MACRO']
           EOF
 
-          echo "=== cross-file 内容 ==="
+          echo "=== cross-file ==="
           cat "$CROSS_FILE"
 
-      # ============================================================
-      # 构建 SciPy
-      # ============================================================
       - name: Build SciPy
         run: |
           set -euo pipefail
@@ -164,8 +159,7 @@ jobs:
           rm -rf "$RECIPE_DIR"
           mkdir -p "$RECIPE_DIR"
 
-          # 创建最小化 meta.yaml
-          cat > "$RECIPE_DIR/meta.yaml" <<'EOF'
+          cat > "$RECIPE_DIR/meta.yaml" <<EOF
           package:
             name: scipy
             version: "${{ inputs.scipy_version }}"
@@ -201,12 +195,9 @@ jobs:
             exit 1
           fi
 
-          echo "=== 构建产物 ==="
+          echo "=== 产物 ==="
           find "$PYPI_DIR/dist" -name "*scipy*android_*.whl" -ls
 
-      # ============================================================
-      # 检查 Soname 兼容性
-      # ============================================================
       - name: Check Soname compatibility
         if: success()
         run: |
@@ -217,7 +208,7 @@ jobs:
           mkdir -p /tmp/scipy-check
           unzip -q "$WHEEL" -d /tmp/scipy-check
 
-          echo "=== 检查 .so 文件的 DT_NEEDED ==="
+          echo "=== .so 的 DT_NEEDED ==="
           find /tmp/scipy-check -name "*.so" -exec sh -c '
             for so; do
               echo "--- $so ---"
@@ -226,16 +217,13 @@ jobs:
           ' _ {} \;
 
           echo ""
-          echo "=== 检查 libgfortran 的 SONAME ==="
+          echo "=== libgfortran 的 SONAME ==="
           find /opt/chaquopy-deps/libgfortran -name "libgfortran.so*" -exec sh -c '
             for so; do
               echo "--- $so ---"
               readelf -d "$so" | grep -E "SONAME" || true
             done
           ' _ {} \;
-
-          echo ""
-          echo "=== 如果发现 DT_NEEDED 是 libgfortran.so.3，需要创建符号链接 ==="
 
       - name: Fix Soname if needed
         if: success()
@@ -244,17 +232,16 @@ jobs:
           PYPI_DIR="/opt/chaquopy/server/pypi"
           WHEEL=$(find "$PYPI_DIR/dist" -name "*scipy*android_*.whl" | head -1)
           WORK_DIR=/tmp/scipy-fix
+          rm -rf "$WORK_DIR"
           mkdir -p "$WORK_DIR"
           unzip -q "$WHEEL" -d "$WORK_DIR"
 
-          # 检查是否有 .so 依赖 libgfortran.so.3
           NEEDS_3=$(find "$WORK_DIR" -name "*.so" -exec sh -c '
             readelf -d "$1" 2>/dev/null | grep -c "libgfortran.so.3" || true
           ' _ {} \; | awk '{s+=$1} END{print s+0}')
 
           if [ "$NEEDS_3" -gt 0 ]; then
-            echo "⚠️ 发现 $NEEDS_3 个 .so 文件依赖 libgfortran.so.3，创建符号链接..."
-            # 在 wheel 的 lib 目录下创建符号链接
+            echo "⚠️ $NEEDS_3 个 .so 依赖 libgfortran.so.3，创建符号链接"
             find "$WORK_DIR" -type d -name "lib" -exec sh -c '
               for libdir; do
                 if [ -f "$libdir/libgfortran.so.5" ]; then
@@ -263,12 +250,12 @@ jobs:
                 fi
               done
             ' _ {} \;
-            # 重新打包 wheel
             cd "$WORK_DIR"
+            rm -f "$WHEEL"
             zip -qr "$WHEEL" .
-            echo "✅ Wheel 已重新打包"
+            echo "✅ 重新打包完成"
           else
-            echo "✅ 没有 .so 文件依赖 libgfortran.so.3，无需处理"
+            echo "✅ 无需处理"
           fi
 
       - name: Collect wheel
