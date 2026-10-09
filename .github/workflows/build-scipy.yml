@@ -174,7 +174,8 @@ jobs:
 
           [properties]
           longdouble_format = 'IEEE_QUAD_LE'
-
+          needs_exe_wrapper = true
+          
           [built-in options]
           c_args = ['-D__BIONIC_NO_PAGE_SIZE_MACRO']
           cpp_args = ['-D__BIONIC_NO_PAGE_SIZE_MACRO']
