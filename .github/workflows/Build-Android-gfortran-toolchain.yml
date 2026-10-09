@@ -228,14 +228,6 @@ jobs:
           tar -xf gcc.tar.xz
           rm -f gcc.tar.xz
 
-      # ============================================================
-      # 工具 wrappers
-      #   ld wrapper：
-      #     - 过滤 GNU ld 特有参数
-      #     - 过滤 crt*.o（通配，兼容完整路径）
-      #     - 过滤 -lgcc_s / -lpthread / -lrt / -ldl（bionic 里合并进 libc）
-      #     - 保留 -lgcc（这是我们编出来的 libgcc.a）
-      # ============================================================
       - name: Create tool wrappers
         run: |
           set -euo pipefail
@@ -245,7 +237,6 @@ jobs:
           mkdir -p "$WRAP" "$TARGET_BIN"
           CLANG_TARGET="aarch64-linux-android${API_LEVEL}"
 
-          # as wrapper
           cat > "$WRAP/as" <<EOF
           #!/bin/bash
           out=""; input=""
@@ -269,30 +260,25 @@ jobs:
           EOF
           chmod +x "$WRAP/as"
 
-          # ld wrapper
           cat > "$WRAP/ld" <<EOF
           #!/bin/bash
           ARGS=()
           while [ \$# -gt 0 ]; do
             case "\$1" in
-              # --- GNU ld 特有开关 ---
               -maarch64linux|-EL|-EB|-X|-V)
                 shift ;;
               -dynamic-linker)
                 shift 2 ;;
               -dynamic-linker=*)
                 shift ;;
-              # --- glibc 风格 crt 启动文件（通配，兼容完整路径）---
               *crt1.o|*crti.o|*crtn.o|*crtbegin.o|*crtbeginS.o|*crtbeginT.o|*crtend.o|*crtendS.o)
                 shift ;;
               *Scrt1.o|*rcrt1.o|*gcrt1.o|*grcrt1.o|*crtfastmath.o)
                 shift ;;
-              # --- glibc 特有库，bionic 里合并进 libc ---
               -lgcc_s)
                 shift ;;
               -lpthread|-lrt|-ldl)
                 shift ;;
-              # --- 保留 -lgcc（这是我们编出来的 libgcc.a）---
               *)
                 ARGS+=("\$1")
                 shift ;;
@@ -376,23 +362,6 @@ jobs:
           cd "$BUILD_DIR"
           make -j"$(nproc)" all-gcc 2>&1 | tee /tmp/gcc-build-gcc.log
 
-      - name: Diagnose libbacktrace link failure
-        continue-on-error: true
-        run: |
-          set -x
-          NDK_SYSROOT="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
-          XGCC="$BUILD_DIR/gcc/xgcc"
-
-          echo "===== xgcc 链接一个最小程序 ====="
-          cat > /tmp/t3.c <<'EOF'
-          int main(void){return 0;}
-          EOF
-          "$XGCC" -B"$BUILD_DIR/gcc/" \
-            --sysroot="$NDK_SYSROOT" \
-            -include "$PREDEF_HEADER" \
-            -o /tmp/t3 /tmp/t3.c -v 2>&1 | tail -60 || true
-          ls -la /tmp/t3 2>/dev/null || echo "(t3 未生成)"
-
       - name: Build target-libgcc
         run: |
           set -euo pipefail
@@ -406,25 +375,28 @@ jobs:
         run: |
           LOG="$BUILD_DIR/aarch64-linux-android/libgcc/config.log"
           [ -f "$LOG" ] && { echo "=== config.log 尾部 200 行 ==="; tail -200 "$LOG"; }
-          echo ""
-          XGCC="$BUILD_DIR/gcc/xgcc"
-          if [ -x "$XGCC" ]; then
-            cat > /tmp/t2.c <<'EOF'
-          #include <stdio.h>
-          #include <sys/types.h>
-          int main(void){return 0;}
-          EOF
-            "$XGCC" -B"$BUILD_DIR/gcc/" -include "$PREDEF_HEADER" \
-              -c /tmp/t2.c -o /tmp/t2.o -v 2>&1 | tail -60 || true
-          fi
 
+      # ============================================================
+      # ★ libgfortran：先 sed Makefile 撤销 -Werror=，再编译
+      # ============================================================
       - name: Build target-libgfortran
         if: success()
         run: |
           set -euo pipefail
           cd "$BUILD_DIR"
+
+          LF_MAKEFILE="$BUILD_DIR/aarch64-linux-android/libgfortran/Makefile"
+          if [ -f "$LF_MAKEFILE" ]; then
+            echo "--- Makefile 里的 -Werror= （修补前）---"
+            grep -oE '\-Werror=[a-z-]+' "$LF_MAKEFILE" | sort -u || true
+            sed -i 's/-Werror=implicit-function-declaration/-Wno-error=implicit-function-declaration/g' "$LF_MAKEFILE"
+            sed -i 's/-Werror=vla/-Wno-error=vla/g' "$LF_MAKEFILE"
+            echo "--- 修补后 ---"
+            grep -oE '\-W(no-)?error=[a-z-]+' "$LF_MAKEFILE" | sort -u || true
+          fi
+
           make -j"$(nproc)" all-target-libgfortran \
-            CFLAGS_FOR_TARGET="-g -O2 -include $PREDEF_HEADER" \
+            CFLAGS_FOR_TARGET="-g -O2 -include $PREDEF_HEADER -Wno-error=implicit-function-declaration -Wno-error=vla" \
             2>&1 | tee /tmp/gcc-build-libgfortran.log
 
       - name: Install GCC
