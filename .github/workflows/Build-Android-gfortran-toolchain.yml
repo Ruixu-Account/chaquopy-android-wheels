@@ -374,11 +374,11 @@ jobs:
               's/-Werror([=[:space:]]|$)/-Wno-error\1/g'
 
           make -j"$(nproc)" all-target-libgcc \
-            CFLAGS_FOR_TARGET="-g -O2 -fPIC -include $PREDEF_HEADER" \
+            CFLAGS_FOR_TARGET="-g -O2 -fPIC -Wno-error=implicit-function-declaration -Wno-error=vla -include $PREDEF_HEADER" \
             2>&1 | tee /tmp/gcc-build-libgcc.log
 
       # ============================================================
-      # libgfortran：CFLAGS_FOR_TARGET 里加 -fPIC（关键）
+      # libgfortran：-fPIC + -Wno-error=... 都要给
       # ============================================================
       - name: Build target-libgfortran
         if: success()
@@ -386,14 +386,17 @@ jobs:
           set -euo pipefail
           cd "$BUILD_DIR"
 
+          # 二次保险：Makefile 如果已经生成，直接 sed
           LF_MAKEFILE="$BUILD_DIR/aarch64-linux-android/libgfortran/Makefile"
           if [ -f "$LF_MAKEFILE" ]; then
             sed -i 's/-Werror=implicit-function-declaration/-Wno-error=implicit-function-declaration/g' "$LF_MAKEFILE"
             sed -i 's/-Werror=vla/-Wno-error=vla/g' "$LF_MAKEFILE"
           fi
 
+          # 关键：CFLAGS_FOR_TARGET 里同时带 -fPIC 和 -Wno-error
+          # 后者会覆盖 Makefile 里硬编码的 -Werror=
           make -j"$(nproc)" all-target-libgfortran \
-            CFLAGS_FOR_TARGET="-g -O2 -fPIC -include $PREDEF_HEADER" \
+            CFLAGS_FOR_TARGET="-g -O2 -fPIC -Wno-error=implicit-function-declaration -Wno-error=vla -include $PREDEF_HEADER" \
             2>&1 | tee /tmp/gcc-build-libgfortran.log
 
       - name: Install GCC
