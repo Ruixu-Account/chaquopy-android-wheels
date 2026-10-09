@@ -78,8 +78,8 @@ jobs:
 
       # ============================================================
       # 重建 gfortran 编译时依赖的 ld/as wrapper
-      #   gfortran 的 spec 里硬编码了 --with-ld=/tmp/gcc-tools/ld，
-      #   但这个临时目录在上次构建后已被清理。重建它。
+      #   gfortran 的 spec 硬编码了 --with-ld=/tmp/gcc-tools/ld，
+      #   临时目录被清掉后需要重建。ld wrapper 过滤 GNU ld 特有参数。
       # ============================================================
       - name: Recreate ld/as wrappers for gfortran toolchain
         run: |
@@ -88,13 +88,20 @@ jobs:
           WRAP=/tmp/gcc-tools
           mkdir -p "$WRAP"
 
-          # ld wrapper
           cat > "$WRAP/ld" <<EOF
           #!/bin/bash
           ARGS=()
           while [ \$# -gt 0 ]; do
             case "\$1" in
               -maarch64linux|-EL|-EB|-X|-V)
+                shift ;;
+              --build-id=*|--build-id)
+                shift ;;
+              --no-rosegment|--rosegment)
+                shift ;;
+              -z)
+                shift 2 ;;
+              -z*)
                 shift ;;
               -dynamic-linker)
                 shift 2 ;;
@@ -117,7 +124,6 @@ jobs:
           EOF
           chmod +x "$WRAP/ld"
 
-          # as wrapper
           cat > "$WRAP/as" <<EOF
           #!/bin/bash
           out=""; input=""
