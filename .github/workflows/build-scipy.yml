@@ -67,9 +67,6 @@ jobs:
         run: |
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;${NDK_VERSION}" || true
 
-      # ============================================================
-      # 下载并解压自建 gfortran 工具链
-      # ============================================================
       - name: Download and extract gfortran toolchain
         run: |
           set -euo pipefail
@@ -79,13 +76,11 @@ jobs:
           echo "/opt/android-gfortran/bin" >> $GITHUB_PATH
           /opt/android-gfortran/bin/aarch64-linux-android-gfortran --version | head -1
 
-      # ============================================================
-      # 下载 Chaquopy 预编译依赖
-      # ============================================================
       - name: Download Chaquopy prebuilt dependencies
         run: |
           set -euo pipefail
-          mkdir -p /opt/chaquopy-deps/{libgfortran,openblas}
+          mkdir -p /opt/chaquopy-deps/libgfortran
+          mkdir -p /opt/chaquopy-deps/openblas
           wget -q "${LIBGFORTRAN_URL}" -O /tmp/libgfortran.whl
           wget -q "${OPENBLAS_URL}" -O /tmp/openblas.whl
           unzip -q /tmp/libgfortran.whl -d /opt/chaquopy-deps/libgfortran
@@ -94,14 +89,16 @@ jobs:
           find /opt/chaquopy-deps/libgfortran -name "*.so*" -exec ls -la {} \;
           echo "--- openblas ---"
           find /opt/chaquopy-deps/openblas -name "*.so*" -exec ls -la {} \;
-          # 追加到 Download Chaquopy prebuilt dependencies 末尾
-          PYPI_DIST="/opt/chaquopy/server/pypi/dist"
-          mkdir -p "$PYPI_DIST/chaquopy-libgfortran" "$PYPI_DIST/chaquopy-openblas"
-          wget -q "${LIBGFORTRAN_URL}" -O "$PYPI_DIST/chaquopy-libgfortran/chaquopy_libgfortran-4.9-0-py3-none-android_21_arm64_v8a.whl"
-          wget -q "${OPENBLAS_URL}" -O "$PYPI_DIST/chaquopy-openblas/chaquopy_openblas-0.2.20-5-py3-none-android_21_arm64_v8a.whl"
 
       - name: Clone Chaquopy ${{ env.CHAQUOPY_VERSION }}
         run: |
+          set -euo pipefail
+          # 保险：如果 $CHAQUOPY_ROOT 存在但不是 git 仓库，先清掉
+          if [ -d "$CHAQUOPY_ROOT" ] && [ ! -d "$CHAQUOPY_ROOT/.git" ]; then
+            echo "⚠️ $CHAQUOPY_ROOT 存在但不是 git 仓库，先清掉"
+            ls -la "$CHAQUOPY_ROOT"
+            rm -rf "$CHAQUOPY_ROOT"
+          fi
           git clone --depth 1 --branch $CHAQUOPY_VERSION --recurse-submodules \
             https://github.com/chaquo/chaquopy.git $CHAQUOPY_ROOT
           cd $CHAQUOPY_ROOT
@@ -127,29 +124,32 @@ jobs:
           bash $GITHUB_WORKSPACE/scripts/inject-sysconfig.sh \
             "3.12" "${{ inputs.python_target_version }}"
 
-      # ============================================================
-      # ★ 下载自建 numpy 2.5.3 wheel 到 Chaquopy 本地索引
-      #   build-wheel.py 会优先从 dist/numpy/ 找，避免去官方源查
-      #   （官方源最高只有 1.26.2）
-      # ============================================================
-      - name: Download custom numpy wheel into Chaquopy dist
+      - name: Download custom wheels into Chaquopy dist
         run: |
           set -euo pipefail
-          NUMPY_DIR="/opt/chaquopy/server/pypi/dist/numpy"
-          mkdir -p "$NUMPY_DIR"
-          if [ -f "$NUMPY_DIR/${NUMPY_FILENAME}" ]; then
-            echo "✅ 已存在: $NUMPY_DIR/${NUMPY_FILENAME}"
-          else
-            wget -q --tries=3 --timeout=300 "${NUMPY_URL}" -O "$NUMPY_DIR/${NUMPY_FILENAME}"
-          fi
-          echo "--- dist/numpy 内容 ---"
-          ls -la "$NUMPY_DIR"
-          echo "--- dist/ 整体 ---"
-          find /opt/chaquopy/server/pypi/dist -maxdepth 2 -name "*.whl" | sort
+          PYPI_DIST="$CHAQUOPY_ROOT/server/pypi/dist"
+          mkdir -p "$PYPI_DIST"
 
-      # ============================================================
-      # 生成 Meson 交叉编译文件
-      # ============================================================
+          mkdir -p "$PYPI_DIST/numpy"
+          if [ ! -f "$PYPI_DIST/numpy/${NUMPY_FILENAME}" ]; then
+            wget -q --tries=3 --timeout=300 "${NUMPY_URL}" -O "$PYPI_DIST/numpy/${NUMPY_FILENAME}"
+          fi
+
+          mkdir -p "$PYPI_DIST/chaquopy-libgfortran"
+          LIBGFORTRAN_WHEEL="chaquopy_libgfortran-4.9-0-py3-none-android_21_arm64_v8a.whl"
+          if [ ! -f "$PYPI_DIST/chaquopy-libgfortran/$LIBGFORTRAN_WHEEL" ]; then
+            wget -q "${LIBGFORTRAN_URL}" -O "$PYPI_DIST/chaquopy-libgfortran/$LIBGFORTRAN_WHEEL"
+          fi
+
+          mkdir -p "$PYPI_DIST/chaquopy-openblas"
+          OPENBLAS_WHEEL="chaquopy_openblas-0.2.20-5-py3-none-android_21_arm64_v8a.whl"
+          if [ ! -f "$PYPI_DIST/chaquopy-openblas/$OPENBLAS_WHEEL" ]; then
+            wget -q "${OPENBLAS_URL}" -O "$PYPI_DIST/chaquopy-openblas/$OPENBLAS_WHEEL"
+          fi
+
+          echo "--- dist/ 全部 ---"
+          find "$PYPI_DIST" -maxdepth 2 -name "*.whl" | sort
+
       - name: Generate Meson cross file
         run: |
           set -euo pipefail
@@ -183,13 +183,10 @@ jobs:
           echo "=== cross-file ==="
           cat "$CROSS_FILE"
 
-      # ============================================================
-      # 构建 SciPy
-      # ============================================================
       - name: Build SciPy
         run: |
           set -euo pipefail
-          PYPI_DIR="/opt/chaquopy/server/pypi"
+          PYPI_DIR="$CHAQUOPY_ROOT/server/pypi"
           RECIPE_DIR="$PYPI_DIR/packages/astrbot-scipy"
           LOG="/tmp/build-scipy.log"
 
@@ -239,7 +236,7 @@ jobs:
         if: success()
         run: |
           set -euo pipefail
-          PYPI_DIR="/opt/chaquopy/server/pypi"
+          PYPI_DIR="$CHAQUOPY_ROOT/server/pypi"
           WHEEL=$(find "$PYPI_DIR/dist" -name "*scipy*android_*.whl" | head -1)
           echo "Wheel: $WHEEL"
           mkdir -p /tmp/scipy-check
@@ -266,7 +263,7 @@ jobs:
         if: success()
         run: |
           set -euo pipefail
-          PYPI_DIR="/opt/chaquopy/server/pypi"
+          PYPI_DIR="$CHAQUOPY_ROOT/server/pypi"
           WHEEL=$(find "$PYPI_DIR/dist" -name "*scipy*android_*.whl" | head -1)
           WORK_DIR=/tmp/scipy-fix
           rm -rf "$WORK_DIR"
@@ -299,7 +296,7 @@ jobs:
         if: success()
         run: |
           mkdir -p /tmp/all-wheels
-          find /opt/chaquopy/server/pypi/dist -name "*scipy*android_*.whl" \
+          find "$CHAQUOPY_ROOT/server/pypi/dist" -name "*scipy*android_*.whl" \
             -exec cp -f {} /tmp/all-wheels/ \;
           ls -la /tmp/all-wheels/
 
