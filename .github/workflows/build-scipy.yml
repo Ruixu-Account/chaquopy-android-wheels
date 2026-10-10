@@ -303,8 +303,8 @@ jobs:
           echo "--- host numpy 目录 ---"
           ls -la /tmp/host-numpy/numpy/_core/ | head -15
 
-          echo "--- 验证 host python 能用这个 numpy ---"
-          PYTHONPATH=/tmp/host-numpy python3 -c "import numpy; print(numpy.get_include()); print(numpy.__version__)"
+          echo "--- 验证 host python3.12 能用这个 numpy ---"
+          PYTHONPATH=/tmp/host-numpy python3.12 -c "import numpy; print(numpy.get_include()); print(numpy.__version__)"
 
       - name: Generate Meson cross file
         run: |
