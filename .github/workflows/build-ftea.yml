@@ -132,9 +132,9 @@ jobs:
             number: 0
           requirements:
             build:
-              - setuptools
-              - wheel
-              - cython
+              - setuptools 69.1.1
+              - wheel 0.42.0
+              - cython 3.1.0
             host:
               - python
           EOF
