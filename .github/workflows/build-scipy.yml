@@ -291,24 +291,14 @@ jobs:
           echo "--- numpy-config 已创建 ---"
           which numpy-config
 
-      # ============================================================
-      # ★ 下载 x86_64 numpy wheel 到 /tmp/host-numpy
-      #   SciPy meson.build 里硬编码 python -c 'import numpy'
-      #   target numpy 在 host 上加载不了，用 host numpy 顶替
-      #   numpy 头文件平台无关，target 编译时用 host include 完全 OK
-      # ============================================================
       - name: Prepare host numpy for SciPy's meson import
         run: |
           set -euo pipefail
-          pip download --no-deps --only-binary=:all: \
-            --platform manylinux2014_x86_64 \
-            --python-version 3.12 \
-            --implementation cp \
-            --abi cp312 \
-            numpy==2.5.3 -d /tmp/host-numpy-wheel
+          NUMPY_WHEEL_URL="https://files.pythonhosted.org/packages/65/af/aa78d1a88805456e212b65461354cd943197fb9acecc4c90fd12295123a3/numpy-2.5.3-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl"
 
           mkdir -p /tmp/host-numpy
-          unzip -q /tmp/host-numpy-wheel/numpy-*.whl -d /tmp/host-numpy
+          wget -q --tries=3 --timeout=300 "$NUMPY_WHEEL_URL" -O /tmp/host-numpy.whl
+          unzip -q /tmp/host-numpy.whl -d /tmp/host-numpy
 
           echo "--- host numpy 目录 ---"
           ls -la /tmp/host-numpy/numpy/_core/ | head -15
