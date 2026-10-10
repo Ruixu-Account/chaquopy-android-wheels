@@ -58,6 +58,18 @@ jobs:
         run: |
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;${NDK_VERSION}" || true
 
+      # ============================================================
+      # 全局 git 配置：任何 git clone 都自动拉 submodule
+      # ftea 的 simple-crypto/ 和 xtea-c/ 可能是 submodule，
+      # 如果 build-wheel.py 内部的 clone 没带 --recurse-submodules，
+      # 这个配置能兜住
+      # ============================================================
+      - name: Configure git for submodules
+        run: |
+          git config --global submodule.recurse true
+          echo "--- git 全局配置 ---"
+          git config --global --list
+
       - name: Clone Chaquopy ${{ env.CHAQUOPY_VERSION }}
         run: |
           set -euo pipefail
@@ -75,10 +87,6 @@ jobs:
           python --version
           pip install -r $CHAQUOPY_ROOT/server/pypi/requirements.txt
 
-      # ============================================================
-      # 只 patch1：让 build env 的 python 名带版本号
-      # setuptools 项目不需要 cross-file（patch3），也不需要 PyO3（patch2）
-      # ============================================================
       - name: Patch Chaquopy build-wheel.py
         run: |
           python3 - <<'PY'
@@ -108,8 +116,8 @@ jobs:
             "3.12" "${{ inputs.python_target_version }}"
 
       # ============================================================
-      # ftea 走 build-wheel.py 的标准 PyPI 流程
-      # setuptools + Cython，无外部依赖
+      # ftea：source 改为 git_url，不指定 git_rev（用默认分支）
+      # 因为 0.1.10 是主分支代码，作者没打 tag
       # ============================================================
       - name: Build ftea
         run: |
@@ -125,7 +133,8 @@ jobs:
           package:
             name: ftea
             version: "${{ inputs.ftea_version }}"
-          source: pypi
+          source:
+            git_url: https://github.com/synodriver/ftea
           build:
             number: 0
           requirements:
