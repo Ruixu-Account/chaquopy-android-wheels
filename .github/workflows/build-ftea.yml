@@ -4,9 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       ftea_version:
-        description: 'ftea 版本'
+        description: 'ftea 版本（用于 wheel 文件名，需与源码 __init__.py 一致）'
         required: true
         default: '0.1.10'
+      ftea_commit:
+        description: 'ftea Git commit hash（建议 40 位完整 hash 以冻结版本）'
+        required: true
+        default: '43d4f6a735b0da1b1dd4157845eb66140effdc2c'
       python_target_version:
         description: 'Chaquopy Python target 版本'
         required: true
@@ -58,17 +62,9 @@ jobs:
         run: |
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;${NDK_VERSION}" || true
 
-      # ============================================================
-      # 全局 git 配置：任何 git clone 都自动拉 submodule
-      # ftea 的 simple-crypto/ 和 xtea-c/ 可能是 submodule，
-      # 如果 build-wheel.py 内部的 clone 没带 --recurse-submodules，
-      # 这个配置能兜住
-      # ============================================================
       - name: Configure git for submodules
         run: |
           git config --global submodule.recurse true
-          echo "--- git 全局配置 ---"
-          git config --global --list
 
       - name: Clone Chaquopy ${{ env.CHAQUOPY_VERSION }}
         run: |
@@ -115,10 +111,6 @@ jobs:
           bash $GITHUB_WORKSPACE/scripts/inject-sysconfig.sh \
             "3.12" "${{ inputs.python_target_version }}"
 
-      # ============================================================
-      # ftea：source 改为 git_url，不指定 git_rev（用默认分支）
-      # 因为 0.1.10 是主分支代码，作者没打 tag
-      # ============================================================
       - name: Build ftea
         run: |
           set -euo pipefail
@@ -135,7 +127,7 @@ jobs:
             version: "${{ inputs.ftea_version }}"
           source:
             git_url: https://github.com/synodriver/ftea
-            git_rev: main
+            git_rev: ${{ inputs.ftea_commit }}
           build:
             number: 0
           requirements:
