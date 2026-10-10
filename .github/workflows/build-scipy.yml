@@ -76,9 +76,6 @@ jobs:
           echo "/opt/android-gfortran/bin" >> $GITHUB_PATH
           /opt/android-gfortran/bin/aarch64-linux-android-gfortran --version | head -1
 
-      # ============================================================
-      # 重建 gfortran 编译时依赖的 ld/as wrapper
-      # ============================================================
       - name: Recreate ld/as wrappers for gfortran toolchain
         run: |
           set -euo pipefail
@@ -265,6 +262,41 @@ jobs:
           echo "--- dist/ 全部 ---"
           find "$PYPI_DIST" -maxdepth 2 -name "*.whl" | sort
 
+      # ============================================================
+      # numpy-config shim：SciPy meson.build 用 dependency('numpy') 找 numpy 头文件
+      # Chaquopy 的 numpy wheel 不带 numpy-config，需要自造。
+      # 顺序：先建 shim，再生成 cross file（cross file 要引用这个路径）
+      # ============================================================
+      - name: Create numpy-config shim for SciPy's meson
+        run: |
+          set -euo pipefail
+          cat > /usr/local/bin/numpy-config <<'SCRIPT'
+          #!/bin/bash
+          NUMPY_INC=""
+          for base in /opt/chaquopy/server/pypi/packages/*/build/*/*/requirements; do
+            if [ -d "$base/numpy/_core/include" ]; then
+              NUMPY_INC="$base/numpy/_core/include"
+              break
+            fi
+          done
+          if [ -z "$NUMPY_INC" ]; then
+            echo "numpy-config: cannot find numpy include dir" >&2
+            exit 1
+          fi
+          case "$1" in
+            --cflags) echo "-I${NUMPY_INC}" ;;
+            --version) echo "2.5.3" ;;
+            *)
+              echo "usage: numpy-config [--cflags|--version]" >&2
+              exit 1
+              ;;
+          esac
+          SCRIPT
+          chmod +x /usr/local/bin/numpy-config
+          echo "--- numpy-config 已创建 ---"
+          which numpy-config
+          cat /usr/local/bin/numpy-config
+
       - name: Generate Meson cross file
         run: |
           set -euo pipefail
@@ -280,6 +312,7 @@ jobs:
           strip = '${NDK_BIN}/llvm-strip'
           ld = '${NDK_BIN}/ld.lld'
           ranlib = '${NDK_BIN}/llvm-ranlib'
+          numpy-config = '/usr/local/bin/numpy-config'
 
           [host_machine]
           system = 'android'
@@ -365,15 +398,6 @@ jobs:
             done
           ' _ {} \;
 
-          echo ""
-          echo "=== libgfortran 的 SONAME ==="
-          find /opt/chaquopy-deps/libgfortran -name "libgfortran.so*" -exec sh -c '
-            for so; do
-              echo "--- $so ---"
-              readelf -d "$so" | grep -E "SONAME" || true
-            done
-          ' _ {} \;
-
       - name: Fix Soname if needed
         if: success()
         run: |
@@ -395,7 +419,6 @@ jobs:
               for libdir; do
                 if [ -f "$libdir/libgfortran.so.5" ]; then
                   ln -sf libgfortran.so.5 "$libdir/libgfortran.so.3"
-                  echo "已创建: $libdir/libgfortran.so.3 -> libgfortran.so.5"
                 fi
               done
             ' _ {} \;
