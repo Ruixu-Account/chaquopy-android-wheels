@@ -54,7 +54,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential wget unzip patchelf jq zip ninja-build file
+            build-essential wget unzip patchelf jq zip ninja-build file pkg-config
 
       - name: Set Android env
         run: |
@@ -164,8 +164,8 @@ jobs:
           unzip -q /tmp/openblas.whl -d /opt/chaquopy-deps/openblas
           echo "--- libgfortran ---"
           find /opt/chaquopy-deps/libgfortran -name "*.so*" -exec ls -la {} \;
-          echo "--- openblas ---"
-          find /opt/chaquopy-deps/openblas -name "*.so*" -exec ls -la {} \;
+          echo "--- openblas 完整内容 ---"
+          find /opt/chaquopy-deps/openblas -type f -exec ls -la {} \;
 
       - name: Clone Chaquopy ${{ env.CHAQUOPY_VERSION }}
         run: |
@@ -185,9 +185,6 @@ jobs:
           python --version
           pip install -r $CHAQUOPY_ROOT/server/pypi/requirements.txt
 
-      # ============================================================
-      # ★ patch2 追加 PYTHONPATH：让 build env 的子进程优先加载 host numpy
-      # ============================================================
       - name: Patch Chaquopy build-wheel.py
         run: |
           python3 - <<'PY'
@@ -223,12 +220,6 @@ jobs:
           open(p, "w").write(src)
           print("=== 3 patches ok ===")
           PY
-          echo "=== verify patch1 ==="
-          grep -n "python_executable=" /opt/chaquopy/server/pypi/build-wheel.py
-          echo "=== verify patch2 ==="
-          grep -n "PYO3_CROSS_LIB_DIR\|PYTHONPATH" /opt/chaquopy/server/pypi/build-wheel.py
-          echo "=== verify patch3 ==="
-          grep -n "setup-args" /opt/chaquopy/server/pypi/build-wheel.py
 
       - name: Download Android Python target
         run: |
@@ -286,15 +277,46 @@ jobs:
           case "$1" in
             --cflags) echo "-I${NUMPY_INC}" ;;
             --version) echo "2.5.3" ;;
-            *)
-              echo "usage: numpy-config [--cflags|--version]" >&2
-              exit 1
-              ;;
+            *) exit 1 ;;
           esac
           SCRIPT
           chmod +x /usr/local/bin/numpy-config
-          echo "--- numpy-config 已创建 ---"
-          which numpy-config
+
+      # ============================================================
+      # ★ pkg-config wrapper：拦截 openblas / scipy-openblas 查询
+      #   其余转发给系统 pkg-config
+      # ============================================================
+      - name: Create pkg-config wrapper for OpenBLAS
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/pkgconfig-shim
+          cat > /tmp/pkgconfig-shim/pkg-config <<'SCRIPT'
+          #!/bin/bash
+          OPENBLAS_LIB="/opt/chaquopy-deps/openblas/chaquopy/lib"
+          ALL="$*"
+
+          if [[ "$ALL" == *openblas* ]] || [[ "$ALL" == *OpenBLAS* ]] || [[ "$ALL" == *scipy-openblas* ]]; then
+            case "$ALL" in
+              *"--modversion"*) echo "0.2.20"; exit 0 ;;
+              *"--cflags"*)     exit 0 ;;
+              *"--libs"*)       echo "-L${OPENBLAS_LIB} -lopenblas"; exit 0 ;;
+              *"--exists"*)     exit 0 ;;
+              *"--variable=libdir"*)     echo "${OPENBLAS_LIB}"; exit 0 ;;
+              *"--variable=includedir"*) echo "/opt/chaquopy-deps/openblas/chaquopy/include"; exit 0 ;;
+              *"--variable=prefix"*)     echo "/opt/chaquopy-deps/openblas/chaquopy"; exit 0 ;;
+              *"--variable=pcfiledir"*)  echo "/tmp/pkgconfig-shim"; exit 0 ;;
+              *) exit 0 ;;
+            esac
+          fi
+
+          exec /usr/bin/pkg-config "$@"
+          SCRIPT
+          chmod +x /tmp/pkgconfig-shim/pkg-config
+          echo "--- wrapper 内容 ---"
+          cat /tmp/pkgconfig-shim/pkg-config
+          echo "--- 测试 ---"
+          /tmp/pkgconfig-shim/pkg-config --modversion openblas
+          /tmp/pkgconfig-shim/pkg-config --libs openblas
 
       - name: Prepare host numpy for SciPy's meson import
         run: |
@@ -305,10 +327,6 @@ jobs:
           wget -q --tries=3 --timeout=300 "$NUMPY_WHEEL_URL" -O /tmp/host-numpy.whl
           unzip -q /tmp/host-numpy.whl -d /tmp/host-numpy
 
-          echo "--- host numpy 目录 ---"
-          ls -la /tmp/host-numpy/numpy/_core/ | head -15
-
-          echo "--- 验证 host python3.12 能用这个 numpy ---"
           PYTHONPATH=/tmp/host-numpy python3.12 -c "import numpy; print(numpy.get_include()); print(numpy.__version__)"
 
       - name: Generate Meson cross file
@@ -327,6 +345,7 @@ jobs:
           ld = '${NDK_BIN}/ld.lld'
           ranlib = '${NDK_BIN}/llvm-ranlib'
           numpy-config = '/usr/local/bin/numpy-config'
+          pkg-config = '/tmp/pkgconfig-shim/pkg-config'
 
           [host_machine]
           system = 'android'
@@ -378,9 +397,6 @@ jobs:
               - chaquopy-openblas 0.2.20
           EOF
 
-          echo "=== meta.yaml ==="
-          cat "$RECIPE_DIR/meta.yaml"
-
           cd "$PYPI_DIR"
           if ! python build-wheel.py \
                 --python 3.12 \
@@ -391,7 +407,6 @@ jobs:
             exit 1
           fi
 
-          echo "=== 产物 ==="
           find "$PYPI_DIR/dist" -name "*scipy*android_*.whl" -ls
 
       - name: Check Soname compatibility
@@ -400,11 +415,8 @@ jobs:
           set -euo pipefail
           PYPI_DIR="$CHAQUOPY_ROOT/server/pypi"
           WHEEL=$(find "$PYPI_DIR/dist" -name "*scipy*android_*.whl" | head -1)
-          echo "Wheel: $WHEEL"
           mkdir -p /tmp/scipy-check
           unzip -q "$WHEEL" -d /tmp/scipy-check
-
-          echo "=== .so 的 DT_NEEDED ==="
           find /tmp/scipy-check -name "*.so" -exec sh -c '
             for so; do
               echo "--- $so ---"
@@ -428,7 +440,7 @@ jobs:
           ' _ {} \; | awk '{s+=$1} END{print s+0}')
 
           if [ "$NEEDS_3" -gt 0 ]; then
-            echo "⚠️ $NEEDS_3 个 .so 依赖 libgfortran.so.3，创建符号链接"
+            echo "⚠️ $NEEDS_3 个 .so 依赖 libgfortran.so.3"
             find "$WORK_DIR" -type d -name "lib" -exec sh -c '
               for libdir; do
                 if [ -f "$libdir/libgfortran.so.5" ]; then
@@ -439,9 +451,6 @@ jobs:
             cd "$WORK_DIR"
             rm -f "$WHEEL"
             zip -qr "$WHEEL" .
-            echo "✅ 重新打包完成"
-          else
-            echo "✅ 无需处理"
           fi
 
       - name: Collect wheel
