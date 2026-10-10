@@ -76,6 +76,10 @@ jobs:
           echo "/opt/android-gfortran/bin" >> $GITHUB_PATH
           /opt/android-gfortran/bin/aarch64-linux-android-gfortran --version | head -1
 
+      # ============================================================
+      # ld wrapper：过滤 GNU ld 特有参数
+      # 这次新增：--start-group / --end-group / --version-script
+      # ============================================================
       - name: Recreate ld/as wrappers for gfortran toolchain
         run: |
           set -euo pipefail
@@ -105,6 +109,15 @@ jobs:
                 shift 2 ;;
               -dynamic-linker=*)
                 shift ;;
+              # GNU ld 的组标记：丢
+              --start-group|--end-group)
+                shift ;;
+              # --version-script=path：丢（我们不限制符号导出）
+              --version-script=*)
+                shift ;;
+              --version-script)
+                shift 2 ;;
+              # glibc crt 文件
               *crt1.o|*crti.o|*crtn.o|*crtbegin.o|*crtbeginS.o|*crtbeginT.o|*crtend.o|*crtendS.o)
                 shift ;;
               *Scrt1.o|*rcrt1.o|*gcrt1.o|*grcrt1.o|*crtfastmath.o)
@@ -150,9 +163,6 @@ jobs:
           ln -sf "${NDK_BIN}/llvm-nm"      "$WRAP/nm"
           ln -sf "${NDK_BIN}/llvm-strip"   "$WRAP/strip"
 
-          echo "--- /tmp/gcc-tools 已重建 ---"
-          ls -la "$WRAP"
-
       - name: Download Chaquopy prebuilt dependencies
         run: |
           set -euo pipefail
@@ -162,16 +172,12 @@ jobs:
           wget -q "${OPENBLAS_URL}" -O /tmp/openblas.whl
           unzip -q /tmp/libgfortran.whl -d /opt/chaquopy-deps/libgfortran
           unzip -q /tmp/openblas.whl -d /opt/chaquopy-deps/openblas
-          echo "--- libgfortran ---"
-          find /opt/chaquopy-deps/libgfortran -name "*.so*" -exec ls -la {} \;
-          echo "--- openblas 完整内容 ---"
           find /opt/chaquopy-deps/openblas -type f -exec ls -la {} \;
 
       - name: Clone Chaquopy ${{ env.CHAQUOPY_VERSION }}
         run: |
           set -euo pipefail
           if [ -d "$CHAQUOPY_ROOT" ] && [ ! -d "$CHAQUOPY_ROOT/.git" ]; then
-            echo "⚠️ $CHAQUOPY_ROOT 存在但不是 git 仓库，先清掉"
             rm -rf "$CHAQUOPY_ROOT"
           fi
           git clone --depth 1 --branch $CHAQUOPY_VERSION --recurse-submodules \
@@ -255,9 +261,6 @@ jobs:
             wget -q "${OPENBLAS_URL}" -O "$PYPI_DIST/chaquopy-openblas/$OPENBLAS_WHEEL"
           fi
 
-          echo "--- dist/ 全部 ---"
-          find "$PYPI_DIST" -maxdepth 2 -name "*.whl" | sort
-
       - name: Create numpy-config shim for SciPy's meson
         run: |
           set -euo pipefail
@@ -270,10 +273,7 @@ jobs:
               break
             fi
           done
-          if [ -z "$NUMPY_INC" ]; then
-            echo "numpy-config: cannot find numpy include dir" >&2
-            exit 1
-          fi
+          [ -z "$NUMPY_INC" ] && exit 1
           case "$1" in
             --cflags) echo "-I${NUMPY_INC}" ;;
             --version) echo "2.5.3" ;;
@@ -282,10 +282,6 @@ jobs:
           SCRIPT
           chmod +x /usr/local/bin/numpy-config
 
-      # ============================================================
-      # ★ pkg-config wrapper：拦截 openblas / scipy-openblas 查询
-      #   其余转发给系统 pkg-config
-      # ============================================================
       - name: Create pkg-config wrapper for OpenBLAS
         run: |
           set -euo pipefail
@@ -294,8 +290,7 @@ jobs:
           #!/bin/bash
           OPENBLAS_LIB="/opt/chaquopy-deps/openblas/chaquopy/lib"
           ALL="$*"
-
-          if [[ "$ALL" == *openblas* ]] || [[ "$ALL" == *OpenBLAS* ]] || [[ "$ALL" == *scipy-openblas* ]]; then
+          if [[ "$ALL" == *openblas* ]] || [[ "$ALL" == *OpenBLAS* ]]; then
             case "$ALL" in
               *"--modversion"*) echo "0.2.20"; exit 0 ;;
               *"--cflags"*)     exit 0 ;;
@@ -308,26 +303,18 @@ jobs:
               *) exit 0 ;;
             esac
           fi
-
           exec /usr/bin/pkg-config "$@"
           SCRIPT
           chmod +x /tmp/pkgconfig-shim/pkg-config
-          echo "--- wrapper 内容 ---"
-          cat /tmp/pkgconfig-shim/pkg-config
-          echo "--- 测试 ---"
-          /tmp/pkgconfig-shim/pkg-config --modversion openblas
-          /tmp/pkgconfig-shim/pkg-config --libs openblas
 
       - name: Prepare host numpy for SciPy's meson import
         run: |
           set -euo pipefail
           NUMPY_WHEEL_URL="https://files.pythonhosted.org/packages/65/af/aa78d1a88805456e212b65461354cd943197fb9acecc4c90fd12295123a3/numpy-2.5.3-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl"
-
           mkdir -p /tmp/host-numpy
           wget -q --tries=3 --timeout=300 "$NUMPY_WHEEL_URL" -O /tmp/host-numpy.whl
           unzip -q /tmp/host-numpy.whl -d /tmp/host-numpy
-
-          PYTHONPATH=/tmp/host-numpy python3.12 -c "import numpy; print(numpy.get_include()); print(numpy.__version__)"
+          PYTHONPATH=/tmp/host-numpy python3.12 -c "import numpy; print(numpy.get_include())"
 
       - name: Generate Meson cross file
         run: |
@@ -362,7 +349,6 @@ jobs:
           cpp_args = ['-D__BIONIC_NO_PAGE_SIZE_MACRO']
           EOF
 
-          echo "=== cross-file ==="
           cat "$CROSS_FILE"
 
       - name: Build SciPy
@@ -440,7 +426,6 @@ jobs:
           ' _ {} \; | awk '{s+=$1} END{print s+0}')
 
           if [ "$NEEDS_3" -gt 0 ]; then
-            echo "⚠️ $NEEDS_3 个 .so 依赖 libgfortran.so.3"
             find "$WORK_DIR" -type d -name "lib" -exec sh -c '
               for libdir; do
                 if [ -f "$libdir/libgfortran.so.5" ]; then
