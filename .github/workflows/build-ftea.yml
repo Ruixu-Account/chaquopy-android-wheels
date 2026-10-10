@@ -135,6 +135,7 @@ jobs:
             version: "${{ inputs.ftea_version }}"
           source:
             git_url: https://github.com/synodriver/ftea
+            git_rev: main
           build:
             number: 0
           requirements:
