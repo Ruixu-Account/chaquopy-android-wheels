@@ -6,7 +6,7 @@ on:
       ftea_version:
         description: 'ftea 版本'
         required: true
-        default: '0.1.9'
+        default: '0.1.10'
       python_target_version:
         description: 'Chaquopy Python target 版本'
         required: true
