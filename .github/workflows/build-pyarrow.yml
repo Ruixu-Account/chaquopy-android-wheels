@@ -197,56 +197,58 @@ jobs:
           [ -f python/CMakeLists.txt ] || { echo "FATAL: CMakeLists.txt missing"; exit 1; }
           [ -f python/pyproject.toml ] || { echo "FATAL: pyproject.toml missing"; exit 1; }
 
-          echo "=== BEFORE: license 字段 ==="
-          grep -n "^license" python/pyproject.toml || echo "(none)"
+          echo "=== PATCH_V3_MARKER ==="
+          echo "=== Patch 0: 复制 cpp/cmake_modules -> python/cmake_modules ==="
+          rm -rf python/cmake_modules
+          cp -a cpp/cmake_modules python/cmake_modules
+          ls python/cmake_modules/ | head -20
 
-          cat > /tmp/patch_license.py <<'PATCH_EOF'
+          echo "=== Patch 1: pyproject.toml license 字段 ==="
+          grep -n "^license" python/pyproject.toml || echo "(none)"
+          python3 - <<'PY'
           import re
           path = "python/pyproject.toml"
           content = open(path).read()
-          new_content = re.sub(
-              r'^license\s*=\s*"([^"]+)"',
-              r'license = {text = "\1"}',
-              content,
-              flags=re.MULTILINE
-          )
-          if new_content == content:
-              print("WARN: no license line changed")
-          else:
-              print("OK: license patched")
+          new_content = re.sub(r'^license\s*=\s*"([^"]+)"', r'license = {text = "\1"}', content, flags=re.MULTILINE)
+          print("OK: license patched" if new_content != content else "WARN: no license line changed")
           open(path, "w").write(new_content)
-          PATCH_EOF
-          python3 /tmp/patch_license.py
-
-          echo "=== AFTER: license 字段 ==="
+          PY
           grep -n "^license" python/pyproject.toml || echo "(none)"
 
-          echo "=== BEFORE: Python3Alt 相关 ==="
-          grep -n "Python3Alt\|NumPy_INCLUDE\|NUMPY_LIB" python/CMakeLists.txt || echo "(none)"
+          echo "=== Patch 2: python/CMakeLists.txt ==="
+          echo "--- BEFORE: ../cpp/cmake_modules refs ---"
+          grep -n '\.\./cpp/cmake_modules' python/CMakeLists.txt || echo "(none)"
 
-          cat > /tmp/patch_arrow.py <<'PATCH_EOF'
+          python3 - <<'PY'
           import re
           path = "python/CMakeLists.txt"
           content = open(path).read()
 
+          content = content.replace('../cpp/cmake_modules', 'cmake_modules')
+          content = content.replace('${CMAKE_SOURCE_DIR}/../cpp/cmake_modules', '${CMAKE_SOURCE_DIR}/cmake_modules')
+          content = content.replace('${CMAKE_CURRENT_SOURCE_DIR}/../cpp/cmake_modules', '${CMAKE_CURRENT_SOURCE_DIR}/cmake_modules')
+
           old_alt = 'find_package(Python3Alt REQUIRED)'
-          new_alt = '''# === Chaquopy patch: 手工设置 Python/NumPy 路径 ===
-          set(Python3_NumPy_INCLUDE_DIR "/tmp/numpy-include/numpy/_core/include")
-          message(STATUS "Chaquopy: Python3_NumPy_INCLUDE_DIR = ${Python3_NumPy_INCLUDE_DIR}")
-          if(NOT EXISTS "${Python3_NumPy_INCLUDE_DIR}")
-            message(FATAL_ERROR "Chaquopy: numpy include dir not exist: ${Python3_NumPy_INCLUDE_DIR}")
-          endif()'''
-          if old_alt not in content:
-              raise SystemExit("FATAL: find_package(Python3Alt REQUIRED) not found")
-          content = content.replace(old_alt, new_alt, 1)
+          new_alt = '''set(Python3_NumPy_INCLUDE_DIR "/tmp/numpy-include/numpy/_core/include")
+          set(Python3_NumPy_INCLUDE_DIRS "/tmp/numpy-include/numpy/_core/include")
+          set(Python3_NumPy_VERSION "2.5.3")
+          set(Python3_VERSION "3.12.12")
+          set(Python3_EXECUTABLE "/opt/hostedtoolcache/Python/3.12.15/x64/bin/python3.12")
+          set(Cython_VERSION "3.1.0")'''
+          if old_alt in content:
+              content = content.replace(old_alt, new_alt, 1)
+              print("OK: replaced find_package(Python3Alt)")
+          else:
+              print("WARN: find_package(Python3Alt) not found")
 
           open(path, "w").write(content)
-          print("OK: patched find_package(Python3Alt)")
-          PATCH_EOF
-          python3 /tmp/patch_arrow.py
+          print("OK: patched")
+          PY
 
-          echo "=== AFTER: python/CMakeLists.txt ==="
-          grep -n "Chaquopy\|Python3_NumPy" python/CMakeLists.txt | head -10 || echo "(none)"
+          echo "--- AFTER: cmake_modules refs ---"
+          grep -n 'cmake_modules' python/CMakeLists.txt | head -10 || echo "(none)"
+          echo "--- AFTER: NumPy/Cython vars ---"
+          grep -n 'Python3_NumPy\|Cython_VERSION\|Python3Alt' python/CMakeLists.txt | head -20 || echo "(none)"
 
       - name: Prepare pyarrow recipe
         run: |
