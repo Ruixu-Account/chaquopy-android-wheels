@@ -85,13 +85,25 @@ jobs:
           old3 = '            return self.builder.build("wheel", "dist")'
           new3 = '''            py_include = f"{self.host_env}/chaquopy/include/python{self.python}"
                       py_lib = f"{self.host_env}/chaquopy/lib/libpython{self.python}.so"
-                      numpy_include = "/tmp/numpy-include/numpy/_core/include"
-                      arrow_dir = "/tmp/arrow-install/lib/cmake/arrow"
-                      arrow_prefix = "/tmp/arrow-install"
                       import os, sys
                       host_python = sys.executable
-                      hp = f"/opt/hostedtoolcache/Python/3.12.15/x64/bin/python3.12"
+                      hp = "/opt/hostedtoolcache/Python/3.12.15/x64/bin/python3.12"
                       if os.path.exists(hp): host_python = hp
+
+                      # 全部路径都在 /opt/chaquopy/server/pypi/ 白名单下，
+                      # 不会被 compiler-wrapper.py 过滤
+                      numpy_include = "/opt/chaquopy/server/pypi/numpy-include/numpy/_core/include"
+                      arrow_prefix = "/opt/chaquopy/server/pypi/arrow-install"
+                      arrow_dir = f"{arrow_prefix}/lib/cmake/arrow"
+                      arrow_include = f"{arrow_prefix}/include"
+
+                      print(f"Chaquopy: numpy_include = {numpy_include}")
+                      print(f"Chaquopy: arrow_prefix = {arrow_prefix}")
+                      print(f"Chaquopy: arrow_dir = {arrow_dir}")
+                      assert os.path.isdir(numpy_include), f"missing {numpy_include}"
+                      assert os.path.isdir(arrow_dir), f"missing {arrow_dir}"
+                      assert os.path.isdir(arrow_include), f"missing {arrow_include}"
+
                       return self.builder.build("wheel", "dist", config_settings={
                           "cmake.define.CMAKE_PREFIX_PATH": arrow_prefix,
                           "cmake.define.Arrow_DIR": arrow_dir,
@@ -133,7 +145,7 @@ jobs:
                           "cmake.define.Python_INCLUDE_DIR": py_include,
                           "cmake.define.Python_LIBRARY": py_lib,
                           "cmake.define.Python3_NumPy_INCLUDE_DIR": numpy_include,
-                          "cmake.define.NUMPY_LIB": "/tmp/numpy-include",
+                          "cmake.define.NUMPY_LIB": "/opt/chaquopy/server/pypi/numpy-include",
                       })'''
           if old3 not in src: raise SystemExit("patch3 not found")
           src = src.replace(old3, new3, 1)
@@ -189,11 +201,12 @@ jobs:
           NUMPY_URL="https://github.com/Ruixu-Account/chaquopy-android-wheels/releases/download/latest/numpy-2.5.3-0-cp312-cp312-android_24_arm64_v8a.whl"
           wget -q "$NUMPY_URL" -O "$DIST_DIR/numpy/numpy-2.5.3-0-cp312-cp312-android_24_arm64_v8a.whl"
 
-          rm -rf /tmp/numpy-include
-          mkdir -p /tmp/numpy-include
-          unzip -q "$DIST_DIR/numpy/numpy-2.5.3-0-cp312-cp312-android_24_arm64_v8a.whl" -d /tmp/numpy-include
-
-          ls -la /tmp/numpy-include/numpy/_core/include/ || { echo "NumPy include dir missing"; exit 1; }
+          # 解压到 Chaquopy 白名单目录下，避免 compiler-wrapper.py 过滤
+          NUMPY_INC=/opt/chaquopy/server/pypi/numpy-include
+          rm -rf "$NUMPY_INC"
+          mkdir -p "$NUMPY_INC"
+          unzip -q "$DIST_DIR/numpy/numpy-2.5.3-0-cp312-cp312-android_24_arm64_v8a.whl" -d "$NUMPY_INC"
+          ls -la "$NUMPY_INC/numpy/_core/include/" || { echo "NumPy include dir missing"; exit 1; }
 
           wget -q "https://chaquo.com/pypi-13.1/chaquopy-libcxx/chaquopy_libcxx-180000-0-py3-none-android_24_arm64_v8a.whl" -O "$DIST_DIR/chaquopy-libcxx/chaquopy_libcxx-180000-0-py3-none-android_24_arm64_v8a.whl"
           find "$DIST_DIR" -name "*.whl" -exec ls -la {} \;
@@ -209,7 +222,7 @@ jobs:
           [ -f python/CMakeLists.txt ] || { echo "FATAL: python/CMakeLists.txt missing"; exit 1; }
           [ -f python/pyproject.toml ] || { echo "FATAL: python/pyproject.toml missing"; exit 1; }
 
-          echo "=== PATCH_V17_MARKER ==="
+          echo "=== PATCH_V19_MARKER ==="
           rm -rf python/cmake_modules
           cp -a cpp/cmake_modules python/cmake_modules
 
@@ -232,8 +245,8 @@ jobs:
           content = content.replace('${CMAKE_CURRENT_SOURCE_DIR}/../cpp/cmake_modules', '${CMAKE_CURRENT_SOURCE_DIR}/cmake_modules')
 
           old_alt = 'find_package(Python3Alt REQUIRED)'
-          new_alt = '''set(Python3_NumPy_INCLUDE_DIR "/tmp/numpy-include/numpy/_core/include")
-          set(Python3_NumPy_INCLUDE_DIRS "/tmp/numpy-include/numpy/_core/include")
+          new_alt = '''set(Python3_NumPy_INCLUDE_DIR "/opt/chaquopy/server/pypi/numpy-include/numpy/_core/include")
+          set(Python3_NumPy_INCLUDE_DIRS "/opt/chaquopy/server/pypi/numpy-include/numpy/_core/include")
           set(Python3_NumPy_VERSION "2.5.3")
           set(Python3_VERSION "3.12.12")
           set(Python3_EXECUTABLE "/opt/hostedtoolcache/Python/3.12.15/x64/bin/python3.12")
@@ -407,19 +420,20 @@ jobs:
 
       # ============================================================
       # Stage 1: 编译 libarrow C++ 库
-      # 【V17 关键改动】ARROW_CSV=ON, ARROW_JSON=ON（pyarrow Python 绑定要求）
+      # 【V19 关键改动】ARROW_HOME 从 /tmp 挪到 Chaquopy 白名单目录
       # ============================================================
       - name: Build libarrow C++ (stage 1)
         run: |
           set -euo pipefail
-          ARROW_HOME=/tmp/arrow-install
+          ARROW_HOME=/opt/chaquopy/server/pypi/arrow-install
           BUILD_DIR=/tmp/arrow-cpp-build
           LOG=/tmp/build-arrow-cpp.log
           TOOLCHAIN="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake"
           SYSROOT="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
 
           [ -f "$TOOLCHAIN" ] || { echo "FATAL: NDK toolchain missing"; exit 1; }
-          echo "Using NDK toolchain: $TOOLCHAIN"
+          echo "ARROW_HOME: $ARROW_HOME"
+          echo "TOOLCHAIN: $TOOLCHAIN"
 
           ZLIB_INC=""
           ZLIB_LIB=""
@@ -502,10 +516,6 @@ jobs:
             exit 1
           fi
 
-          echo ""
-          echo "=== zlib detection from CMake output ==="
-          grep -i "zlib\|libz" "$LOG" | head -30 || echo "(no zlib lines)"
-
           set +e
           cmake --build "$BUILD_DIR" --target install -j4 2>&1 | tee -a "$LOG"
           BUILD_RC=${PIPESTATUS[0]}
@@ -519,7 +529,7 @@ jobs:
           fi
 
           echo ""
-          echo "=== /tmp/arrow-install layout ==="
+          echo "=== $ARROW_HOME layout ==="
           find "$ARROW_HOME" -maxdepth 3 -type d | head -30
           echo "=== ArrowConfig.cmake ==="
           find "$ARROW_HOME" -name "ArrowConfig.cmake" -o -name "arrow-config.cmake" || echo "(not found!)"
