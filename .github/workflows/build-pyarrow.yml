@@ -208,7 +208,7 @@ jobs:
           [ -f python/CMakeLists.txt ] || { echo "FATAL: python/CMakeLists.txt missing"; exit 1; }
           [ -f python/pyproject.toml ] || { echo "FATAL: python/pyproject.toml missing"; exit 1; }
 
-          echo "=== PATCH_V6_MARKER ==="
+          echo "=== PATCH_V7_MARKER ==="
           echo "=== Patch 0: cpp/cmake_modules -> python/cmake_modules ==="
           rm -rf python/cmake_modules
           cp -a cpp/cmake_modules python/cmake_modules
@@ -254,7 +254,7 @@ jobs:
           PY
 
       # ============================================================
-      # Stage 1: 编译 libarrow C++ 库（git clone 的 cpp/ 目录）
+      # Stage 1: 编译 libarrow C++ 库
       # ============================================================
       - name: Build libarrow C++ (stage 1)
         run: |
@@ -309,6 +309,8 @@ jobs:
             -DARROW_WITH_GRPC=OFF \
             -DARROW_WITH_THRIFT=OFF \
             -DARROW_WITH_PROTOBUF=ON \
+            -DARROW_PROTOBUF_ARROW_CMAKE_PACKAGE_NAME=Protobuf \
+            -DARROW_PROTOBUF_ARROW_PC_PACKAGE_NAME=protobuf \
             -DARROW_WITH_BOOST=OFF \
             -DARROW_S3=OFF \
             -DARROW_GCS=OFF \
