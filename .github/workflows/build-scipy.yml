@@ -78,7 +78,6 @@ jobs:
 
       # ============================================================
       # ld wrapper：过滤 GNU ld 特有参数
-      # 这次新增：--start-group / --end-group / --version-script
       # ============================================================
       - name: Recreate ld/as wrappers for gfortran toolchain
         run: |
@@ -109,15 +108,12 @@ jobs:
                 shift 2 ;;
               -dynamic-linker=*)
                 shift ;;
-              # GNU ld 的组标记：丢
               --start-group|--end-group)
                 shift ;;
-              # --version-script=path：丢（我们不限制符号导出）
               --version-script=*)
                 shift ;;
               --version-script)
                 shift 2 ;;
-              # glibc crt 文件
               *crt1.o|*crti.o|*crtn.o|*crtbegin.o|*crtbeginS.o|*crtbeginT.o|*crtend.o|*crtendS.o)
                 shift ;;
               *Scrt1.o|*rcrt1.o|*gcrt1.o|*grcrt1.o|*crtfastmath.o)
@@ -345,7 +341,7 @@ jobs:
           needs_exe_wrapper = true
 
           [built-in options]
-          c_args = ['-D__BIONIC_NO_PAGE_SIZE_MACRO']
+          c_args = ['-D__BIONIC_NO_PAGE_SIZE_MACRO', '-include', 'complex.h']
           cpp_args = ['-D__BIONIC_NO_PAGE_SIZE_MACRO']
           EOF
 
