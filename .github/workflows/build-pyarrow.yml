@@ -238,7 +238,7 @@ jobs:
             name: pyarrow
             version: "${{ inputs.pyarrow_version }}"
           source:
-            path: /tmp/arrow-src
+            path: /tmp/arrow-src/python
           build:
             number: 0
           requirements:
