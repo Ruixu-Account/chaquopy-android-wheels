@@ -63,7 +63,6 @@ jobs:
         run: |
           set -euo pipefail
           HOST_PY=$(command -v python3.12)
-          echo "Host Python: $HOST_PY"
           "$HOST_PY" -m pip install --quiet "cython>=3.1" "setuptools_scm[toml]>=8"
           "$HOST_PY" -c "import Cython; print('Cython version:', Cython.__version__)"
 
@@ -87,21 +86,25 @@ jobs:
           new3 = '''            py_include = f"{self.host_env}/chaquopy/include/python{self.python}"
                       py_lib = f"{self.host_env}/chaquopy/lib/libpython{self.python}.so"
                       numpy_include = "/tmp/numpy-include/numpy/_core/include"
+                      arrow_dir = "/tmp/arrow-install/lib/cmake/arrow"
+                      arrow_prefix = "/tmp/arrow-install"
                       import os, sys
                       host_python = sys.executable
                       hp = f"/opt/hostedtoolcache/Python/3.12.15/x64/bin/python3.12"
                       if os.path.exists(hp): host_python = hp
                       return self.builder.build("wheel", "dist", config_settings={
+                          "cmake.define.CMAKE_PREFIX_PATH": arrow_prefix,
+                          "cmake.define.Arrow_DIR": arrow_dir,
+                          "cmake.define.ARROW_HOME": arrow_prefix,
                           "cmake.define.ARROW_BUILD_TESTS": "OFF",
                           "cmake.define.ARROW_BUILD_BENCHMARKS": "OFF",
                           "cmake.define.ARROW_BUILD_EXAMPLES": "OFF",
-                          "cmake.define.ARROW_BUILD_STATIC": "ON",
+                          "cmake.define.ARROW_BUILD_STATIC": "OFF",
                           "cmake.define.ARROW_BUILD_SHARED": "ON",
                           "cmake.define.ARROW_DEPENDENCY_SOURCE": "BUNDLED",
                           "cmake.define.ARROW_JEMALLOC": "OFF",
                           "cmake.define.ARROW_SIMD_LEVEL": "NONE",
                           "cmake.define.ARROW_RUNTIME_SIMD_LEVEL": "NONE",
-                          "cmake.define.ARROW_CPU_FLAG": "ARMV8",
                           "cmake.define.ARROW_COMPUTE": "ON",
                           "cmake.define.ARROW_CSV": "OFF",
                           "cmake.define.ARROW_JSON": "OFF",
@@ -204,22 +207,21 @@ jobs:
           SDIST_URL="https://files.pythonhosted.org/packages/source/p/pyarrow/pyarrow-${{ inputs.pyarrow_version }}.tar.gz"
           echo "Downloading sdist: $SDIST_URL"
           wget -q --tries=3 --timeout=600 "$SDIST_URL" -O /tmp/pyarrow-sdist.tar.gz
-          echo "=== Sdist size ==="
           ls -la /tmp/pyarrow-sdist.tar.gz
           tar -xzf /tmp/pyarrow-sdist.tar.gz -C /tmp/pyarrow-sdist --strip-components=1
 
           cd /tmp/pyarrow-sdist
-          echo "=== PATCH_V4_MARKER ==="
+          echo "=== PATCH_V5_MARKER ==="
           echo "=== sdist root layout ==="
-          ls -la | head -20
-          echo "=== cpp/ exists? ==="
-          ls cpp/CMakeLists.txt 2>&1 || echo "MISSING cpp/"
-          echo "=== pyproject.toml exists? ==="
+          ls -la | head -30
+          echo "=== cpp/ ==="
+          ls cpp/CMakeLists.txt 2>&1 || echo "MISSING cpp/CMakeLists.txt"
+          echo "=== python/ ==="
+          ls python/CMakeLists.txt 2>&1 || echo "MISSING python/CMakeLists.txt"
+          echo "=== pyproject.toml ==="
           ls pyproject.toml 2>&1 || echo "MISSING pyproject.toml"
-          echo "=== CMakeLists.txt exists? ==="
-          ls CMakeLists.txt 2>&1 || echo "MISSING CMakeLists.txt"
 
-          echo "=== Patch 1: license 字段 ==="
+          echo "=== Patch license ==="
           grep -n "^license" pyproject.toml || echo "(none)"
           python3 - <<'PY'
           import re
@@ -230,6 +232,104 @@ jobs:
           open(path, "w").write(new_content)
           PY
           grep -n "^license" pyproject.toml || echo "(none)"
+
+      # ============================================================
+      # Stage 1: 编译 libarrow C++ 库
+      # pyarrow 的 python 绑定需要 find_package(Arrow) 找到已安装的 libarrow
+      # 所以必须先把 cpp/ 编好装到 /tmp/arrow-install
+      # ============================================================
+      - name: Build libarrow C++ (stage 1)
+        run: |
+          set -euo pipefail
+          NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          ARROW_HOME=/tmp/arrow-install
+          BUILD_DIR=/tmp/arrow-cpp-build
+          LOG=/tmp/build-arrow-cpp.log
+
+          rm -rf "$ARROW_HOME" "$BUILD_DIR"
+          mkdir -p "$ARROW_HOME" "$BUILD_DIR"
+
+          cd /tmp/pyarrow-sdist/cpp
+
+          set +e
+          cmake -B "$BUILD_DIR" -S . -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$ARROW_HOME" \
+            -DCMAKE_C_COMPILER="$NDK_BIN/aarch64-linux-android24-clang" \
+            -DCMAKE_CXX_COMPILER="$NDK_BIN/aarch64-linux-android24-clang++" \
+            -DCMAKE_SYSTEM_NAME=Android \
+            -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
+            -DCMAKE_ANDROID_ARCH_ABI=arm64-v8a \
+            -DCMAKE_ANDROID_API=24 \
+            -DCMAKE_ANDROID_NDK="$ANDROID_NDK_HOME" \
+            -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
+            -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
+            -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
+            -DARROW_BUILD_TESTS=OFF \
+            -DARROW_BUILD_BENCHMARKS=OFF \
+            -DARROW_BUILD_EXAMPLES=OFF \
+            -DARROW_BUILD_STATIC=OFF \
+            -DARROW_BUILD_SHARED=ON \
+            -DARROW_DEPENDENCY_SOURCE=BUNDLED \
+            -DARROW_DEPENDENCY_USE_SHARED=ON \
+            -DARROW_JEMALLOC=OFF \
+            -DARROW_SIMD_LEVEL=NONE \
+            -DARROW_RUNTIME_SIMD_LEVEL=NONE \
+            -DARROW_COMPUTE=ON \
+            -DARROW_CSV=OFF \
+            -DARROW_JSON=OFF \
+            -DARROW_PARQUET=ON \
+            -DARROW_DATASET=OFF \
+            -DARROW_WITH_BROTLI=OFF \
+            -DARROW_WITH_BZ2=OFF \
+            -DARROW_WITH_LZ4=OFF \
+            -DARROW_WITH_SNAPPY=OFF \
+            -DARROW_WITH_ZLIB=ON \
+            -DARROW_WITH_ZSTD=OFF \
+            -DARROW_WITH_UTF8PROC=OFF \
+            -DARROW_WITH_RE2=OFF \
+            -DARROW_WITH_GRPC=OFF \
+            -DARROW_WITH_THRIFT=OFF \
+            -DARROW_WITH_PROTOBUF=ON \
+            -DARROW_WITH_BOOST=OFF \
+            -DARROW_S3=OFF \
+            -DARROW_GCS=OFF \
+            -DARROW_HDFS=OFF \
+            -DARROW_FLIGHT=OFF \
+            -DARROW_GANDIVA=OFF \
+            -DARROW_ACERO=OFF \
+            -DARROW_PYTHON=OFF \
+            -DPROTOBUF_INSTALL=ON \
+            -Dzlib_INSTALL=ON \
+            -DProtobuf_SOURCE=BUNDLED \
+            -Dzlib_SOURCE=BUNDLED \
+            2>&1 | tee "$LOG"
+          CMAKE_RC=${PIPESTATUS[0]}
+          set -e
+          if [ "$CMAKE_RC" -ne 0 ]; then
+            echo "=== CMake config FAILED, last 120 lines ==="
+            tail -120 "$LOG"
+            echo "::error::libarrow CMake configure failed with exit code $CMAKE_RC"
+            exit 1
+          fi
+
+          set +e
+          cmake --build "$BUILD_DIR" --target install -j2 2>&1 | tee -a "$LOG"
+          BUILD_RC=${PIPESTATUS[0]}
+          set -e
+          echo ""
+          echo "=== last 120 lines of libarrow build ==="
+          tail -120 "$LOG"
+          if [ "$BUILD_RC" -ne 0 ]; then
+            echo "::error::libarrow build failed with exit code $BUILD_RC"
+            exit 1
+          fi
+
+          echo ""
+          echo "=== /tmp/arrow-install layout ==="
+          find "$ARROW_HOME" -maxdepth 3 -type d | head -30
+          echo "=== ArrowConfig.cmake ==="
+          find "$ARROW_HOME" -name "ArrowConfig.cmake" -o -name "arrow-config.cmake" || echo "(not found!)"
 
       - name: Prepare pyarrow recipe
         run: |
@@ -258,7 +358,7 @@ jobs:
           EOF
           cat "$RECIPE/meta.yaml"
 
-      - name: Build pyarrow
+      - name: Build pyarrow (stage 2)
         run: |
           cd /opt/chaquopy/server/pypi
           set +e
@@ -271,7 +371,7 @@ jobs:
           echo ""
           echo "=== build-wheel.py exit code: $BUILD_RC ==="
           if [ "$BUILD_RC" -ne 0 ]; then
-            echo "::error::Build pyarrow failed with exit code $BUILD_RC (see log above)"
+            echo "::error::pyarrow build failed with exit code $BUILD_RC"
             exit 1
           fi
 
@@ -308,31 +408,8 @@ jobs:
           ' _ {} \; | sed -E 's/.*\[(.*)\]/\1/' | sort -u
 
           echo ""
-          echo "=== [4] Aggregated SONAME ==="
-          find "$CHECK_DIR" -name "*.so" -type f -exec sh -c '
-            readelf -d "$1" 2>/dev/null | grep "SONAME" || true
-          ' _ {} \; | sed -E 's/.*\[(.*)\]/\1/' | sort -u
-
-          echo ""
-          echo "=== [5] Suspicious refs ==="
-          for pat in 'libgfortran\.so\.3' 'libpthread\.so\.0' 'libdl\.so\.1' 'libstdc\+\+\.so\.6' 'libgcc_s\.so\.1'; do
-            HITS=$(find "$CHECK_DIR" -name "*.so" -type f -exec sh -c "readelf -d \"\$1\" 2>/dev/null | grep -E '$pat' || true" _ {} \; | sort -u)
-            [ -n "$HITS" ] && { echo "WARNING: '$pat' found:"; echo "$HITS" | sed 's/^/    /'; }
-          done
-          echo "=== Suspicious check done ==="
-
-          echo ""
-          echo "=== [6] Architecture check ==="
+          echo "=== [4] Architecture check ==="
           find "$CHECK_DIR" -name "*.so" -type f -exec file {} \; | sed "s|$CHECK_DIR/||" | head -30
-
-          echo ""
-          echo "=== [7] Version metadata ==="
-          find "$CHECK_DIR" -name "*.dist-info" -type d -exec sh -c '
-            for d; do
-              echo "--- ${d#'"$CHECK_DIR"'/} ---"
-              grep -E "^(Name|Version):" "$d/METADATA" 2>/dev/null || true
-            done
-          ' _ {} \;
 
       - name: List built wheels
         if: always()
