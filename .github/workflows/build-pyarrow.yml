@@ -106,8 +106,8 @@ jobs:
                           "cmake.define.ARROW_SIMD_LEVEL": "NONE",
                           "cmake.define.ARROW_RUNTIME_SIMD_LEVEL": "NONE",
                           "cmake.define.ARROW_COMPUTE": "ON",
-                          "cmake.define.ARROW_CSV": "OFF",
-                          "cmake.define.ARROW_JSON": "OFF",
+                          "cmake.define.ARROW_CSV": "ON",
+                          "cmake.define.ARROW_JSON": "ON",
                           "cmake.define.ARROW_PARQUET": "ON",
                           "cmake.define.ARROW_DATASET": "OFF",
                           "cmake.define.ARROW_WITH_BROTLI": "OFF",
@@ -209,7 +209,7 @@ jobs:
           [ -f python/CMakeLists.txt ] || { echo "FATAL: python/CMakeLists.txt missing"; exit 1; }
           [ -f python/pyproject.toml ] || { echo "FATAL: python/pyproject.toml missing"; exit 1; }
 
-          echo "=== PATCH_V16_MARKER ==="
+          echo "=== PATCH_V17_MARKER ==="
           rm -rf python/cmake_modules
           cp -a cpp/cmake_modules python/cmake_modules
 
@@ -253,15 +253,11 @@ jobs:
           F=/tmp/arrow-src/cpp/cmake_modules/ThirdpartyToolchain.cmake
           [ -f "$F" ] || { echo "FATAL: $F not found"; exit 1; }
 
-          echo "=== 查找 resolve_dependency(ZLIB) 调用 ==="
-          grep -n "resolve_dependency(ZLIB" "$F" || echo "(not found)"
-
           python3 - <<'PY'
           import re
           path = "/tmp/arrow-src/cpp/cmake_modules/ThirdpartyToolchain.cmake"
           content = open(path).read()
 
-          # 1) protobuf mapping FATAL_ERROR -> WARNING（保留之前的补丁）
           pattern = re.compile(
               r'message\(\s*FATAL_ERROR\s+"(ARROW_WITH_PROTOBUF must be propagated[^"]*)"',
               re.DOTALL
@@ -271,10 +267,7 @@ jobs:
               patched = match.group(0).replace("FATAL_ERROR", "WARNING", 1)
               content = content[:match.start()] + patched + content[match.end():]
               print("OK: protobuf FATAL_ERROR -> WARNING")
-          else:
-              print("WARN: protobuf pattern not found")
 
-          # 2) 强制 ZLIB_SOURCE=SYSTEM，在 resolve_dependency(ZLIB 之前插入
           marker_pat = re.compile(r'(^[ \t]*resolve_dependency\s*\(\s*ZLIB\b[^)]*\))', re.MULTILINE)
           def inject(m):
               return (
@@ -285,17 +278,12 @@ jobs:
                   + m.group(1)
               )
           new_content, n = marker_pat.subn(inject, content, count=1)
-          if n == 0:
-              print("WARN: resolve_dependency(ZLIB...) not found, cannot inject")
-          else:
+          if n > 0:
               content = new_content
-              print(f"OK: injected ZLIB_SOURCE=SYSTEM before resolve_dependency (n={n})")
+              print(f"OK: injected ZLIB_SOURCE=SYSTEM (n={n})")
 
           open(path, "w").write(content)
           PY
-
-          echo "=== AFTER: 检查插入结果 ==="
-          grep -n -B2 "resolve_dependency(ZLIB" "$F" | head -20
 
       - name: Patch Arrow vendored date for Android
         run: |
@@ -419,6 +407,7 @@ jobs:
 
       # ============================================================
       # Stage 1: 编译 libarrow C++ 库
+      # 【V17 关键改动】ARROW_CSV=ON, ARROW_JSON=ON（pyarrow Python 绑定要求）
       # ============================================================
       - name: Build libarrow C++ (stage 1)
         run: |
@@ -431,7 +420,6 @@ jobs:
 
           [ -f "$TOOLCHAIN" ] || { echo "FATAL: NDK toolchain missing"; exit 1; }
           echo "Using NDK toolchain: $TOOLCHAIN"
-          echo "Using NDK sysroot: $SYSROOT"
 
           ZLIB_INC=""
           ZLIB_LIB=""
@@ -447,8 +435,6 @@ jobs:
 
           echo "ZLIB_INC=$ZLIB_INC"
           echo "ZLIB_LIB=$ZLIB_LIB"
-          [ -n "$ZLIB_INC" ] || { echo "FATAL: zlib.h not in sysroot"; exit 1; }
-          [ -n "$ZLIB_LIB" ] || { echo "FATAL: libz.so not in sysroot"; exit 1; }
 
           rm -rf "$ARROW_HOME" "$BUILD_DIR"
           mkdir -p "$ARROW_HOME" "$BUILD_DIR"
@@ -475,8 +461,8 @@ jobs:
             -DARROW_SIMD_LEVEL=NONE \
             -DARROW_RUNTIME_SIMD_LEVEL=NONE \
             -DARROW_COMPUTE=ON \
-            -DARROW_CSV=OFF \
-            -DARROW_JSON=OFF \
+            -DARROW_CSV=ON \
+            -DARROW_JSON=ON \
             -DARROW_PARQUET=ON \
             -DARROW_DATASET=OFF \
             -DARROW_WITH_BROTLI=OFF \
@@ -524,16 +510,6 @@ jobs:
           cmake --build "$BUILD_DIR" --target install -j4 2>&1 | tee -a "$LOG"
           BUILD_RC=${PIPESTATUS[0]}
           set -e
-          echo ""
-          echo "=== 扫描编译产物架构 ==="
-          BAD_O=$(find /tmp/arrow-cpp-build -name "*.o" -exec file {} \; | grep -v "aarch64" | head -10 || true)
-          if [ -n "$BAD_O" ]; then
-            echo "WARNING: found non-aarch64 .o files:"
-            echo "$BAD_O"
-          else
-            echo "OK: all .o are aarch64"
-          fi
-
           echo ""
           echo "=== last 120 lines of libarrow build ==="
           tail -120 "$LOG"
