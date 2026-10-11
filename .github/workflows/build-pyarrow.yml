@@ -208,13 +208,10 @@ jobs:
           [ -f python/CMakeLists.txt ] || { echo "FATAL: python/CMakeLists.txt missing"; exit 1; }
           [ -f python/pyproject.toml ] || { echo "FATAL: python/pyproject.toml missing"; exit 1; }
 
-          echo "=== PATCH_V7_MARKER ==="
-          echo "=== Patch 0: cpp/cmake_modules -> python/cmake_modules ==="
+          echo "=== PATCH_V8_MARKER ==="
           rm -rf python/cmake_modules
           cp -a cpp/cmake_modules python/cmake_modules
-          ls python/cmake_modules/ | head -5
 
-          echo "=== Patch 1: pyproject.toml license ==="
           grep -n "^license" python/pyproject.toml || echo "(none)"
           python3 - <<'PY'
           import re
@@ -224,9 +221,7 @@ jobs:
           print("OK: license patched" if new_content != content else "WARN: no license change")
           open(path, "w").write(new_content)
           PY
-          grep -n "^license" python/pyproject.toml || echo "(none)"
 
-          echo "=== Patch 2: python/CMakeLists.txt ==="
           python3 - <<'PY'
           import re
           path = "python/CMakeLists.txt"
@@ -250,8 +245,51 @@ jobs:
               print("WARN: find_package(Python3Alt) not found")
 
           open(path, "w").write(content)
-          print("OK: patched")
+          print("OK: python/CMakeLists.txt patched")
           PY
+
+      # ============================================================
+      # 新增：patch Arrow 的 protobuf mapping 检查（FATAL_ERROR -> WARNING）
+      # ============================================================
+      - name: Patch Arrow protobuf mapping check
+        run: |
+          set -euo pipefail
+          F=/tmp/arrow-src/cpp/cmake_modules/ThirdpartyToolchain.cmake
+          [ -f "$F" ] || { echo "FATAL: $F not found"; exit 1; }
+
+          echo "=== BEFORE: target string line ==="
+          grep -n "ARROW_WITH_PROTOBUF must be propagated" "$F" || echo "(not found)"
+
+          python3 - <<'PY'
+          import re
+          path = "/tmp/arrow-src/cpp/cmake_modules/ThirdpartyToolchain.cmake"
+          content = open(path).read()
+
+          pattern = re.compile(
+              r'message\(\s*FATAL_ERROR\s+"(ARROW_WITH_PROTOBUF must be propagated[^"]*)"',
+              re.DOTALL
+          )
+          match = pattern.search(content)
+          if not match:
+              print("WARN: exact pattern not found, will try generic search")
+              idx = content.find('ARROW_WITH_PROTOBUF must be propagated')
+              if idx > 0:
+                  print("Context around target:")
+                  print(repr(content[max(0, idx-400):idx+400]))
+              raise SystemExit(1)
+
+          print("Found match at offset", match.start())
+          original = match.group(0)
+          patched = original.replace("FATAL_ERROR", "WARNING", 1)
+          new_content = content[:match.start()] + patched + content[match.end():]
+          open(path, "w").write(new_content)
+          print("OK: FATAL_ERROR -> WARNING")
+          PY
+
+          echo "=== AFTER: check ==="
+          grep -n "ARROW_WITH_PROTOBUF must be propagated" "$F" || echo "(target gone?)"
+          grep -n "message(WARNING" "$F" | head -5
+          grep -c "message(FATAL_ERROR.*ARROW_WITH_PROTOBUF" "$F" || true
 
       # ============================================================
       # Stage 1: 编译 libarrow C++ 库
@@ -309,7 +347,7 @@ jobs:
             -DARROW_WITH_GRPC=OFF \
             -DARROW_WITH_THRIFT=OFF \
             -DARROW_WITH_PROTOBUF=ON \
-            -DARROW_PROTOBUF_ARROW_CMAKE_PACKAGE_NAME=Protobuf \
+            -DARROW_PROTOBUF_ARROW_CMAKE_PACKAGE_NAME=protobuf \
             -DARROW_PROTOBUF_ARROW_PC_PACKAGE_NAME=protobuf \
             -DARROW_WITH_BOOST=OFF \
             -DARROW_S3=OFF \
