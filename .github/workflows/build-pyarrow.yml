@@ -208,7 +208,7 @@ jobs:
           [ -f python/CMakeLists.txt ] || { echo "FATAL: python/CMakeLists.txt missing"; exit 1; }
           [ -f python/pyproject.toml ] || { echo "FATAL: python/pyproject.toml missing"; exit 1; }
 
-          echo "=== PATCH_V8_MARKER ==="
+          echo "=== PATCH_V9_MARKER ==="
           rm -rf python/cmake_modules
           cp -a cpp/cmake_modules python/cmake_modules
 
@@ -248,9 +248,6 @@ jobs:
           print("OK: python/CMakeLists.txt patched")
           PY
 
-      # ============================================================
-      # 新增：patch Arrow 的 protobuf mapping 检查（FATAL_ERROR -> WARNING）
-      # ============================================================
       - name: Patch Arrow protobuf mapping check
         run: |
           set -euo pipefail
@@ -278,7 +275,6 @@ jobs:
                   print(repr(content[max(0, idx-400):idx+400]))
               raise SystemExit(1)
 
-          print("Found match at offset", match.start())
           original = match.group(0)
           patched = original.replace("FATAL_ERROR", "WARNING", 1)
           new_content = content[:match.start()] + patched + content[match.end():]
@@ -288,8 +284,60 @@ jobs:
 
           echo "=== AFTER: check ==="
           grep -n "ARROW_WITH_PROTOBUF must be propagated" "$F" || echo "(target gone?)"
-          grep -n "message(WARNING" "$F" | head -5
-          grep -c "message(FATAL_ERROR.*ARROW_WITH_PROTOBUF" "$F" || true
+
+      - name: Patch Arrow vendored date for Android
+        run: |
+          set -euo pipefail
+          TZ_H=/tmp/arrow-src/cpp/src/arrow/vendored/datetime/tz.h
+          TZ_CPP=/tmp/arrow-src/cpp/src/arrow/vendored/datetime/tz.cpp
+
+          [ -f "$TZ_H" ] || { echo "FATAL: $TZ_H not found"; exit 1; }
+          [ -f "$TZ_CPP" ] || { echo "FATAL: $TZ_CPP not found"; exit 1; }
+
+          echo "=== Patch 1: parse_from_android_tzdata 从 private 挪到 public ==="
+          grep -n "parse_from_android_tzdata" "$TZ_H" || echo "(not found)"
+
+          python3 - <<'PY'
+          path = "/tmp/arrow-src/cpp/src/arrow/vendored/datetime/tz.h"
+          content = open(path).read()
+          old = "    void parse_from_android_tzdata(std::ifstream& inf, const std::size_t off);"
+          if old in content:
+              new = "public:\n" + old
+              content = content.replace(old, new, 1)
+              print("OK: made parse_from_android_tzdata public")
+          else:
+              print("WARN: exact declaration line not found")
+              idx = content.find("parse_from_android_tzdata")
+              if idx > 0:
+                  print("Context:")
+                  print(content[max(0, idx-300):idx+300])
+          open(path, "w").write(content)
+          PY
+
+          echo "=== Patch 2: tz.cpp:608 删掉 init_tzdb().release() 调用 ==="
+          grep -n "init_tzdb().release()" "$TZ_CPP" || echo "(not found)"
+
+          python3 - <<'PY'
+          path = "/tmp/arrow-src/cpp/src/arrow/vendored/datetime/tz.cpp"
+          content = open(path).read()
+          old = "tzdb_list::undocumented_helper::push_front(tz_db, init_tzdb().release());"
+          if old in content:
+              new = "/* ARROW Android patch: init_tzdb() and tzdb::release() not available on this toolchain */"
+              content = content.replace(old, new, 1)
+              print("OK: commented out init_tzdb().release()")
+          else:
+              print("WARN: init_tzdb().release() line not found")
+              idx = content.find("init_tzdb")
+              if idx >= 0:
+                  print("Context:")
+                  print(content[max(0, idx-300):idx+300])
+          open(path, "w").write(content)
+          PY
+
+          echo "=== AFTER Patch 1 ==="
+          grep -n -B1 "parse_from_android_tzdata" "$TZ_H" | head -10
+          echo "=== AFTER Patch 2 ==="
+          grep -n "init_tzdb" "$TZ_CPP" | head -10 || echo "(none)"
 
       # ============================================================
       # Stage 1: 编译 libarrow C++ 库
