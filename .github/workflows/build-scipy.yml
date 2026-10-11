@@ -77,9 +77,10 @@ jobs:
           /opt/android-gfortran/bin/aarch64-linux-android-gfortran --version | head -1
 
       # ============================================================
-      # 生成 SciPy 复数函数兼容头
-      # bionic 的 clog/cpow/cexp 是 API 26 才有的，API 24 上必须
-      # 自己用 log/atan2/exp 实现 fallback。
+      # SciPy 复数兼容头
+      # 关键：不 include 任何标准头文件！
+      # 用 _Complex 关键字 + __builtin_* 内建函数，
+      # 避免 <complex.h> 的 I/complex 宏污染 unuran 等第三方代码。
       # ============================================================
       - name: Create scipy complex compat header
         run: |
@@ -88,26 +89,34 @@ jobs:
           #ifndef SCIPY_ANDROID_COMPLEX_COMPAT_H
           #define SCIPY_ANDROID_COMPLEX_COMPAT_H
 
-          #include <complex.h>
-          #include <math.h>
-          #include <sys/cdefs.h>
+          /*
+           * bionic API < 26 没有 clog/cexp/cpow 的声明。
+           * 这里用 C99 关键字 _Complex 和 Clang/GCC 的 __builtin_* 内建函数
+           * 手工实现，完全不 include 任何头文件，避免宏污染。
+           */
 
           #if defined(__ANDROID__) && defined(__ANDROID_API__) && (__ANDROID_API__ < 26)
 
-          /* clog(z) = log|z| + i * arg(z) */
-          static inline double complex __scipy_compat_clog(double complex z) {
-              double r = creal(z), i = cimag(z);
-              return log(sqrt(r*r + i*i)) + I * atan2(i, r);
+          static inline _Complex double __scipy_compat_clog(_Complex double z) {
+              double r = __real__ z;
+              double i = __imag__ z;
+              _Complex double result;
+              __real__ result = __builtin_log(__builtin_sqrt(r*r + i*i));
+              __imag__ result = __builtin_atan2(i, r);
+              return result;
           }
 
-          /* cexp(z) = e^a * (cos(b) + i*sin(b)), z = a + bi */
-          static inline double complex __scipy_compat_cexp(double complex z) {
-              double a = creal(z), b = cimag(z);
-              return exp(a) * (cos(b) + I * sin(b));
+          static inline _Complex double __scipy_compat_cexp(_Complex double z) {
+              double a = __real__ z;
+              double b = __imag__ z;
+              double ea = __builtin_exp(a);
+              _Complex double result;
+              __real__ result = ea * __builtin_cos(b);
+              __imag__ result = ea * __builtin_sin(b);
+              return result;
           }
 
-          /* cpow(x, y) = cexp(y * clog(x)) */
-          static inline double complex __scipy_compat_cpow(double complex x, double complex y) {
+          static inline _Complex double __scipy_compat_cpow(_Complex double x, _Complex double y) {
               return __scipy_compat_cexp(y * __scipy_compat_clog(x));
           }
 
@@ -124,7 +133,6 @@ jobs:
 
       # ============================================================
       # C 编译器 wrapper：只对 .c 文件注入 compat header
-      # C++ 不动，避免污染 std::complex
       # ============================================================
       - name: Create C compiler wrapper (inject complex compat)
         run: |
@@ -155,7 +163,7 @@ jobs:
           "$WRAP/aarch64-linux-android${ANDROID_API_LEVEL}-clang" --version | head -1
 
       # ============================================================
-      # ld / as wrapper（保留原来的逻辑）
+      # ld / as wrapper
       # ============================================================
       - name: Recreate ld/as wrappers for gfortran toolchain
         run: |
