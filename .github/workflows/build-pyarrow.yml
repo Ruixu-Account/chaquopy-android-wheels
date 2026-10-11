@@ -209,7 +209,7 @@ jobs:
           [ -f python/CMakeLists.txt ] || { echo "FATAL: python/CMakeLists.txt missing"; exit 1; }
           [ -f python/pyproject.toml ] || { echo "FATAL: python/pyproject.toml missing"; exit 1; }
 
-          echo "=== PATCH_V15_MARKER ==="
+          echo "=== PATCH_V16_MARKER ==="
           rm -rf python/cmake_modules
           cp -a cpp/cmake_modules python/cmake_modules
 
@@ -247,26 +247,55 @@ jobs:
           print("OK: python/CMakeLists.txt patched")
           PY
 
-      - name: Patch Arrow protobuf mapping check
+      - name: Patch Arrow ThirdpartyToolchain (force ZLIB SYSTEM + protobuf WARNING)
         run: |
           set -euo pipefail
+          F=/tmp/arrow-src/cpp/cmake_modules/ThirdpartyToolchain.cmake
+          [ -f "$F" ] || { echo "FATAL: $F not found"; exit 1; }
+
+          echo "=== 查找 resolve_dependency(ZLIB) 调用 ==="
+          grep -n "resolve_dependency(ZLIB" "$F" || echo "(not found)"
+
           python3 - <<'PY'
           import re
           path = "/tmp/arrow-src/cpp/cmake_modules/ThirdpartyToolchain.cmake"
           content = open(path).read()
+
+          # 1) protobuf mapping FATAL_ERROR -> WARNING（保留之前的补丁）
           pattern = re.compile(
               r'message\(\s*FATAL_ERROR\s+"(ARROW_WITH_PROTOBUF must be propagated[^"]*)"',
               re.DOTALL
           )
           match = pattern.search(content)
-          if not match:
-              print("WARN: exact pattern not found")
-              raise SystemExit(1)
-          patched = match.group(0).replace("FATAL_ERROR", "WARNING", 1)
-          new_content = content[:match.start()] + patched + content[match.end():]
-          open(path, "w").write(new_content)
-          print("OK: FATAL_ERROR -> WARNING")
+          if match:
+              patched = match.group(0).replace("FATAL_ERROR", "WARNING", 1)
+              content = content[:match.start()] + patched + content[match.end():]
+              print("OK: protobuf FATAL_ERROR -> WARNING")
+          else:
+              print("WARN: protobuf pattern not found")
+
+          # 2) 强制 ZLIB_SOURCE=SYSTEM，在 resolve_dependency(ZLIB 之前插入
+          marker_pat = re.compile(r'(^[ \t]*resolve_dependency\s*\(\s*ZLIB\b[^)]*\))', re.MULTILINE)
+          def inject(m):
+              return (
+                  "# === ARROW Android patch: force zlib SYSTEM ===\n"
+                  "set(ZLIB_SOURCE SYSTEM CACHE STRING \"\" FORCE)\n"
+                  "set(ZLIB_USE_STATIC_LIBS OFF CACHE BOOL \"\" FORCE)\n"
+                  "# === end patch ===\n"
+                  + m.group(1)
+              )
+          new_content, n = marker_pat.subn(inject, content, count=1)
+          if n == 0:
+              print("WARN: resolve_dependency(ZLIB...) not found, cannot inject")
+          else:
+              content = new_content
+              print(f"OK: injected ZLIB_SOURCE=SYSTEM before resolve_dependency (n={n})")
+
+          open(path, "w").write(content)
           PY
+
+          echo "=== AFTER: 检查插入结果 ==="
+          grep -n -B2 "resolve_dependency(ZLIB" "$F" | head -20
 
       - name: Patch Arrow vendored date for Android
         run: |
@@ -390,7 +419,6 @@ jobs:
 
       # ============================================================
       # Stage 1: 编译 libarrow C++ 库
-      # 【V15 关键改动】zlib 走 SYSTEM，链接 NDK sysroot 里的 libz.so
       # ============================================================
       - name: Build libarrow C++ (stage 1)
         run: |
@@ -401,11 +429,10 @@ jobs:
           TOOLCHAIN="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake"
           SYSROOT="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
 
-          [ -f "$TOOLCHAIN" ] || { echo "FATAL: NDK toolchain file missing: $TOOLCHAIN"; exit 1; }
+          [ -f "$TOOLCHAIN" ] || { echo "FATAL: NDK toolchain missing"; exit 1; }
           echo "Using NDK toolchain: $TOOLCHAIN"
           echo "Using NDK sysroot: $SYSROOT"
 
-          # 探测 sysroot 里的 zlib 路径
           ZLIB_INC=""
           ZLIB_LIB=""
           for p in "$SYSROOT/usr/include/zlib.h"; do
@@ -420,9 +447,8 @@ jobs:
 
           echo "ZLIB_INC=$ZLIB_INC"
           echo "ZLIB_LIB=$ZLIB_LIB"
-          [ -n "$ZLIB_INC" ] || { echo "FATAL: zlib.h not found in sysroot"; find "$SYSROOT" -name "zlib.h" 2>/dev/null | head; exit 1; }
-          [ -n "$ZLIB_LIB" ] || { echo "FATAL: libz.so not found in sysroot"; find "$SYSROOT" -name "libz.so" 2>/dev/null | head; exit 1; }
-          file "$ZLIB_LIB" || true
+          [ -n "$ZLIB_INC" ] || { echo "FATAL: zlib.h not in sysroot"; exit 1; }
+          [ -n "$ZLIB_LIB" ] || { echo "FATAL: libz.so not in sysroot"; exit 1; }
 
           rm -rf "$ARROW_HOME" "$BUILD_DIR"
           mkdir -p "$ARROW_HOME" "$BUILD_DIR"
@@ -458,7 +484,8 @@ jobs:
             -DARROW_WITH_LZ4=OFF \
             -DARROW_WITH_SNAPPY=OFF \
             -DARROW_WITH_ZLIB=ON \
-            -Dzlib_SOURCE=SYSTEM \
+            -DZLIB_SOURCE=SYSTEM \
+            -DZLIB_USE_STATIC_LIBS=OFF \
             -DZLIB_INCLUDE_DIR="$ZLIB_INC" \
             -DZLIB_LIBRARY="$ZLIB_LIB" \
             -DARROW_WITH_ZSTD=OFF \
@@ -485,14 +512,13 @@ jobs:
           if [ "$CMAKE_RC" -ne 0 ]; then
             echo "=== CMake config FAILED, last 120 lines ==="
             tail -120 "$LOG"
-            echo "::error::libarrow CMake configure failed with exit code $CMAKE_RC"
+            echo "::error::libarrow CMake configure failed"
             exit 1
           fi
 
-          # 检查 zlib 是否被正确识别
           echo ""
           echo "=== zlib detection from CMake output ==="
-          grep -i "zlib\|libz" "$LOG" | head -20 || echo "(no zlib lines)"
+          grep -i "zlib\|libz" "$LOG" | head -30 || echo "(no zlib lines)"
 
           set +e
           cmake --build "$BUILD_DIR" --target install -j4 2>&1 | tee -a "$LOG"
@@ -512,7 +538,7 @@ jobs:
           echo "=== last 120 lines of libarrow build ==="
           tail -120 "$LOG"
           if [ "$BUILD_RC" -ne 0 ]; then
-            echo "::error::libarrow build failed with exit code $BUILD_RC"
+            echo "::error::libarrow build failed"
             exit 1
           fi
 
@@ -562,7 +588,7 @@ jobs:
           echo ""
           echo "=== build-wheel.py exit code: $BUILD_RC ==="
           if [ "$BUILD_RC" -ne 0 ]; then
-            echo "::error::pyarrow build failed with exit code $BUILD_RC"
+            echo "::error::pyarrow build failed"
             exit 1
           fi
 
