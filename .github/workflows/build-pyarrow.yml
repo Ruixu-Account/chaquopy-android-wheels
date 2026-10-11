@@ -59,6 +59,14 @@ jobs:
         continue-on-error: true
         run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;27.3.13750724" || true
 
+      - name: Install Cython into host Python
+        run: |
+          set -euo pipefail
+          HOST_PY=$(command -v python3.12)
+          echo "Host Python: $HOST_PY"
+          "$HOST_PY" -m pip install --quiet "cython>=3.1" "setuptools_scm[toml]>=8"
+          "$HOST_PY" -c "import Cython; print('Cython version:', Cython.__version__)"
+
       - name: Patch Chaquopy build-wheel.py
         run: |
           cat > /tmp/patch_bw.py <<'PATCH_EOF'
