@@ -146,6 +146,7 @@ jobs:
                           "cmake.define.ARROW_JSON": "ON",
                           "cmake.define.ARROW_PARQUET": "ON",
                           "cmake.define.ARROW_DATASET": "OFF",
+                          "cmake.define.ARROW_FILESYSTEM": "ON",
                           "cmake.define.ARROW_WITH_BROTLI": "OFF",
                           "cmake.define.ARROW_WITH_BZ2": "OFF",
                           "cmake.define.ARROW_WITH_LZ4": "OFF",
@@ -180,13 +181,6 @@ jobs:
           python3 /tmp/patch_bw.py
           wc -l /tmp/patch_bw.py
 
-      # ============================================================
-      # V21 新增：扩展 compiler-wrapper.py 的白名单
-      # Chaquopy 会过滤编译器命令行里的 -I/-L 参数，只保留 valid_dirs 下的路径。
-      # scikit-build-core 自动生成的临时 build 目录在 /tmp 下，
-      # host Python 头文件在 /opt/hostedtoolcache 下，
-      # 二者都不在白名单里，所以要把这两个目录加进去。
-      # ============================================================
       - name: Patch Chaquopy compiler-wrapper.py (extend whitelist)
         run: |
           set -euo pipefail
@@ -210,7 +204,6 @@ jobs:
                   if line.strip().startswith("valid_dirs") and "abspath" in line:
                       print(f"Found valid_dirs at line {i+1}: {line!r}")
                       insert_at = i + 1
-                      # 逐行插入，不破坏原行
                       lines.insert(insert_at, "# PATCHED_BY_V22: extend whitelist")
                       lines.insert(insert_at + 1, "valid_dirs.append('/tmp')")
                       lines.insert(insert_at + 2, "valid_dirs.append('/opt/hostedtoolcache')")
@@ -228,11 +221,12 @@ jobs:
           PY
 
           echo ""
-          echo "=== Verify patch ==="
+          echo "=== Verify patch (first 25 lines) ==="
           for p in $(find /opt/chaquopy -name "compiler-wrapper.py"); do
-            echo "--- $p (first 25 lines) ---"
+            echo "--- $p ---"
             head -25 "$p"
           done
+
       - name: Download Android Python target
         run: |
           cd /opt/chaquopy
@@ -298,7 +292,7 @@ jobs:
           [ -f python/CMakeLists.txt ] || { echo "FATAL: python/CMakeLists.txt missing"; exit 1; }
           [ -f python/pyproject.toml ] || { echo "FATAL: python/pyproject.toml missing"; exit 1; }
 
-          echo "=== PATCH_V21_MARKER ==="
+          echo "=== PATCH_V22_MARKER ==="
           rm -rf python/cmake_modules
           cp -a cpp/cmake_modules python/cmake_modules
 
@@ -494,6 +488,10 @@ jobs:
           print("OK: nl_langinfo implementation added")
           PY
 
+      # ============================================================
+      # Stage 1: 编译 libarrow C++ 库
+      # 【V22 关键改动】ARROW_FILESYSTEM=ON（pyarrow 的 _fs 模块需要）
+      # ============================================================
       - name: Build libarrow C++ (stage 1)
         run: |
           set -euo pipefail
@@ -549,6 +547,7 @@ jobs:
             -DARROW_JSON=ON \
             -DARROW_PARQUET=ON \
             -DARROW_DATASET=OFF \
+            -DARROW_FILESYSTEM=ON \
             -DARROW_WITH_BROTLI=OFF \
             -DARROW_WITH_BZ2=OFF \
             -DARROW_WITH_LZ4=OFF \
@@ -603,6 +602,8 @@ jobs:
           find "$ARROW_HOME" -maxdepth 4 -type d | head -40
           echo "=== ArrowConfig.cmake ==="
           find "$ARROW_HOME" -name "ArrowConfig.cmake" -o -name "arrow-config.cmake" || echo "(not found!)"
+          echo "=== filesystem header ==="
+          ls -la "$ARROW_HOME/include/arrow/filesystem/api.h" || echo "(missing api.h)"
 
       - name: Prepare pyarrow recipe
         run: |
