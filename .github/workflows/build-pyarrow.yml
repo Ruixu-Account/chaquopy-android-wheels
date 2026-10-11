@@ -114,7 +114,7 @@ jobs:
                           "cmake.define.ARROW_WITH_BZ2": "OFF",
                           "cmake.define.ARROW_WITH_LZ4": "OFF",
                           "cmake.define.ARROW_WITH_SNAPPY": "OFF",
-                          "cmake.define.ARROW_WITH_ZLIB": "ON",
+                          "cmake.define.ARROW_WITH_ZLIB": "OFF",
                           "cmake.define.ARROW_WITH_ZSTD": "OFF",
                           "cmake.define.ARROW_WITH_UTF8PROC": "OFF",
                           "cmake.define.ARROW_WITH_RE2": "OFF",
@@ -209,7 +209,7 @@ jobs:
           [ -f python/CMakeLists.txt ] || { echo "FATAL: python/CMakeLists.txt missing"; exit 1; }
           [ -f python/pyproject.toml ] || { echo "FATAL: python/pyproject.toml missing"; exit 1; }
 
-          echo "=== PATCH_V13_MARKER ==="
+          echo "=== PATCH_V15_MARKER ==="
           rm -rf python/cmake_modules
           cp -a cpp/cmake_modules python/cmake_modules
 
@@ -227,7 +227,6 @@ jobs:
           import re
           path = "python/CMakeLists.txt"
           content = open(path).read()
-
           content = content.replace('../cpp/cmake_modules', 'cmake_modules')
           content = content.replace('${CMAKE_SOURCE_DIR}/../cpp/cmake_modules', '${CMAKE_SOURCE_DIR}/cmake_modules')
           content = content.replace('${CMAKE_CURRENT_SOURCE_DIR}/../cpp/cmake_modules', '${CMAKE_CURRENT_SOURCE_DIR}/cmake_modules')
@@ -244,7 +243,6 @@ jobs:
               print("OK: replaced find_package(Python3Alt)")
           else:
               print("WARN: find_package(Python3Alt) not found")
-
           open(path, "w").write(content)
           print("OK: python/CMakeLists.txt patched")
           PY
@@ -252,7 +250,6 @@ jobs:
       - name: Patch Arrow protobuf mapping check
         run: |
           set -euo pipefail
-          F=/tmp/arrow-src/cpp/cmake_modules/ThirdpartyToolchain.cmake
           python3 - <<'PY'
           import re
           path = "/tmp/arrow-src/cpp/cmake_modules/ThirdpartyToolchain.cmake"
@@ -311,7 +308,6 @@ jobs:
           python3 - <<'PY'
           path = "/tmp/arrow-src/cpp/src/arrow/vendored/musl/strptime.c"
           content = open(path).read()
-
           if "__arrow_nl_langinfo_impl" in content:
               print("WARN: already patched")
               raise SystemExit(0)
@@ -394,9 +390,7 @@ jobs:
 
       # ============================================================
       # Stage 1: 编译 libarrow C++ 库
-      # 【V13 关键改动】改用 NDK 官方 toolchain file
-      # 让 ExternalProject_Add 的依赖（mimalloc/zlib 等）也走交叉编译
-      # 同时关掉 mimalloc（Android 用 bionic 自己的分配器）
+      # 【V15 关键改动】zlib 走 SYSTEM，链接 NDK sysroot 里的 libz.so
       # ============================================================
       - name: Build libarrow C++ (stage 1)
         run: |
@@ -405,9 +399,30 @@ jobs:
           BUILD_DIR=/tmp/arrow-cpp-build
           LOG=/tmp/build-arrow-cpp.log
           TOOLCHAIN="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake"
+          SYSROOT="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
 
           [ -f "$TOOLCHAIN" ] || { echo "FATAL: NDK toolchain file missing: $TOOLCHAIN"; exit 1; }
           echo "Using NDK toolchain: $TOOLCHAIN"
+          echo "Using NDK sysroot: $SYSROOT"
+
+          # 探测 sysroot 里的 zlib 路径
+          ZLIB_INC=""
+          ZLIB_LIB=""
+          for p in "$SYSROOT/usr/include/zlib.h"; do
+            [ -f "$p" ] && ZLIB_INC=$(dirname "$p")
+          done
+          for p in \
+              "$SYSROOT/usr/lib/aarch64-linux-android/24/libz.so" \
+              "$SYSROOT/usr/lib/aarch64-linux-android/libz.so" \
+              "$SYSROOT/usr/lib/libz.so"; do
+            [ -f "$p" ] && ZLIB_LIB="$p" && break
+          done
+
+          echo "ZLIB_INC=$ZLIB_INC"
+          echo "ZLIB_LIB=$ZLIB_LIB"
+          [ -n "$ZLIB_INC" ] || { echo "FATAL: zlib.h not found in sysroot"; find "$SYSROOT" -name "zlib.h" 2>/dev/null | head; exit 1; }
+          [ -n "$ZLIB_LIB" ] || { echo "FATAL: libz.so not found in sysroot"; find "$SYSROOT" -name "libz.so" 2>/dev/null | head; exit 1; }
+          file "$ZLIB_LIB" || true
 
           rm -rf "$ARROW_HOME" "$BUILD_DIR"
           mkdir -p "$ARROW_HOME" "$BUILD_DIR"
@@ -443,6 +458,9 @@ jobs:
             -DARROW_WITH_LZ4=OFF \
             -DARROW_WITH_SNAPPY=OFF \
             -DARROW_WITH_ZLIB=ON \
+            -Dzlib_SOURCE=SYSTEM \
+            -DZLIB_INCLUDE_DIR="$ZLIB_INC" \
+            -DZLIB_LIBRARY="$ZLIB_LIB" \
             -DARROW_WITH_ZSTD=OFF \
             -DARROW_WITH_UTF8PROC=OFF \
             -DARROW_WITH_RE2=OFF \
@@ -460,9 +478,7 @@ jobs:
             -DARROW_ACERO=OFF \
             -DARROW_PYTHON=OFF \
             -DPROTOBUF_INSTALL=ON \
-            -Dzlib_INSTALL=ON \
             -DProtobuf_SOURCE=BUNDLED \
-            -Dzlib_SOURCE=BUNDLED \
             2>&1 | tee "$LOG"
           CMAKE_RC=${PIPESTATUS[0]}
           set -e
@@ -473,10 +489,25 @@ jobs:
             exit 1
           fi
 
+          # 检查 zlib 是否被正确识别
+          echo ""
+          echo "=== zlib detection from CMake output ==="
+          grep -i "zlib\|libz" "$LOG" | head -20 || echo "(no zlib lines)"
+
           set +e
           cmake --build "$BUILD_DIR" --target install -j4 2>&1 | tee -a "$LOG"
           BUILD_RC=${PIPESTATUS[0]}
           set -e
+          echo ""
+          echo "=== 扫描编译产物架构 ==="
+          BAD_O=$(find /tmp/arrow-cpp-build -name "*.o" -exec file {} \; | grep -v "aarch64" | head -10 || true)
+          if [ -n "$BAD_O" ]; then
+            echo "WARNING: found non-aarch64 .o files:"
+            echo "$BAD_O"
+          else
+            echo "OK: all .o are aarch64"
+          fi
+
           echo ""
           echo "=== last 120 lines of libarrow build ==="
           tail -120 "$LOG"
