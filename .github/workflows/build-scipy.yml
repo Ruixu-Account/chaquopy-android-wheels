@@ -77,9 +77,8 @@ jobs:
           /opt/android-gfortran/bin/aarch64-linux-android-gfortran --version | head -1
 
       # ============================================================
-      # SciPy 复数兼容头
-      # 关键：不 include 任何标准头文件！
-      # 用 _Complex 关键字 + __builtin_* 内建函数，
+      # 兼容头 1：SciPy 复数垫片（只给 .c 文件注入）
+      # 关键：不 include 任何标准头文件，用 _Complex 关键字 + __builtin_*，
       # 避免 <complex.h> 的 I/complex 宏污染 unuran 等第三方代码。
       # ============================================================
       - name: Create scipy complex compat header
@@ -88,12 +87,6 @@ jobs:
           cat > /tmp/scipy-complex-compat.h <<'EOF'
           #ifndef SCIPY_ANDROID_COMPLEX_COMPAT_H
           #define SCIPY_ANDROID_COMPLEX_COMPAT_H
-
-          /*
-           * bionic API < 26 没有 clog/cexp/cpow 的声明。
-           * 这里用 C99 关键字 _Complex 和 Clang/GCC 的 __builtin_* 内建函数
-           * 手工实现，完全不 include 任何头文件，避免宏污染。
-           */
 
           #if defined(__ANDROID__) && defined(__ANDROID_API__) && (__ANDROID_API__ < 26)
 
@@ -128,13 +121,46 @@ jobs:
           #endif /* SCIPY_ANDROID_COMPLEX_COMPAT_H */
           EOF
 
-          echo "=== compat header ==="
-          cat /tmp/scipy-complex-compat.h
+      # ============================================================
+      # 兼容头 2：pthread affinity 垫片（只给 .cc/.cpp/.cxx 注入）
+      # bionic 没有 glibc 的 pthread_getaffinity_np/setaffinity_np，
+      # 用 pthread_gettid_np + sched_get/setaffinity 实现。
+      # ============================================================
+      - name: Create pthread affinity compat header
+        run: |
+          set -euo pipefail
+          cat > /tmp/scipy-pthread-affinity-compat.h <<'EOF'
+          #ifndef SCIPY_ANDROID_PTHREAD_AFFINITY_COMPAT_H
+          #define SCIPY_ANDROID_PTHREAD_AFFINITY_COMPAT_H
+
+          #if defined(__ANDROID__)
+          #include <sched.h>
+          #include <pthread.h>
+          #include <unistd.h>
+
+          static inline int __scipy_compat_pthread_getaffinity_np(
+                  pthread_t th, size_t sz, cpu_set_t* cs) {
+              pid_t tid = pthread_gettid_np(th);
+              return sched_getaffinity(tid, sz, cs);
+          }
+
+          static inline int __scipy_compat_pthread_setaffinity_np(
+                  pthread_t th, size_t sz, const cpu_set_t* cs) {
+              pid_t tid = pthread_gettid_np(th);
+              return sched_setaffinity(tid, sz, cs);
+          }
+
+          #define pthread_getaffinity_np __scipy_compat_pthread_getaffinity_np
+          #define pthread_setaffinity_np __scipy_compat_pthread_setaffinity_np
+
+          #endif /* __ANDROID__ */
+          #endif /* SCIPY_ANDROID_PTHREAD_AFFINITY_COMPAT_H */
+          EOF
 
       # ============================================================
-      # C 编译器 wrapper：只对 .c 文件注入 compat header
+      # C 编译器 wrapper：只对 .c 文件注入 complex shim
       # ============================================================
-      - name: Create C compiler wrapper (inject complex compat)
+      - name: Create C compiler wrapper
         run: |
           set -euo pipefail
           NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
@@ -160,7 +186,35 @@ jobs:
           EOF
           chmod +x "$WRAP/aarch64-linux-android${ANDROID_API_LEVEL}-clang"
 
-          "$WRAP/aarch64-linux-android${ANDROID_API_LEVEL}-clang" --version | head -1
+      # ============================================================
+      # C++ 编译器 wrapper：只对 .cc/.cpp/.cxx 文件注入 pthread affinity shim
+      # 注意：不注入 complex shim，避免 C 的 complex/I 宏污染 std::complex
+      # ============================================================
+      - name: Create C++ compiler wrapper
+        run: |
+          set -euo pipefail
+          NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          WRAP=/tmp/clang-wrapper
+          mkdir -p "$WRAP"
+
+          cat > "$WRAP/aarch64-linux-android${ANDROID_API_LEVEL}-clang++" <<EOF
+          #!/bin/bash
+          REAL_CLANG="${NDK_BIN}/aarch64-linux-android${ANDROID_API_LEVEL}-clang++"
+
+          is_cxx=false
+          for arg in "\$@"; do
+            case "\$arg" in
+              *.cc|*.cpp|*.cxx|*.C) is_cxx=true; break ;;
+            esac
+          done
+
+          if \$is_cxx; then
+            exec "\$REAL_CLANG" -include /tmp/scipy-pthread-affinity-compat.h "\$@"
+          else
+            exec "\$REAL_CLANG" "\$@"
+          fi
+          EOF
+          chmod +x "$WRAP/aarch64-linux-android${ANDROID_API_LEVEL}-clang++"
 
       # ============================================================
       # ld / as wrapper
@@ -407,7 +461,7 @@ jobs:
           cat > "$CROSS_FILE" <<EOF
           [binaries]
           c = '/tmp/clang-wrapper/aarch64-linux-android${ANDROID_API_LEVEL}-clang'
-          cpp = '${NDK_BIN}/aarch64-linux-android${ANDROID_API_LEVEL}-clang++'
+          cpp = '/tmp/clang-wrapper/aarch64-linux-android${ANDROID_API_LEVEL}-clang++'
           fortran = '/opt/android-gfortran/bin/aarch64-linux-android-gfortran'
           ar = '${NDK_BIN}/llvm-ar'
           strip = '${NDK_BIN}/llvm-strip'
