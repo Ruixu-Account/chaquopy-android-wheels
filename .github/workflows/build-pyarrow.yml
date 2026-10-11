@@ -208,7 +208,7 @@ jobs:
           [ -f python/CMakeLists.txt ] || { echo "FATAL: python/CMakeLists.txt missing"; exit 1; }
           [ -f python/pyproject.toml ] || { echo "FATAL: python/pyproject.toml missing"; exit 1; }
 
-          echo "=== PATCH_V10_MARKER ==="
+          echo "=== PATCH_V12_MARKER ==="
           rm -rf python/cmake_modules
           cp -a cpp/cmake_modules python/cmake_modules
 
@@ -254,9 +254,6 @@ jobs:
           F=/tmp/arrow-src/cpp/cmake_modules/ThirdpartyToolchain.cmake
           [ -f "$F" ] || { echo "FATAL: $F not found"; exit 1; }
 
-          echo "=== BEFORE: target string line ==="
-          grep -n "ARROW_WITH_PROTOBUF must be propagated" "$F" || echo "(not found)"
-
           python3 - <<'PY'
           import re
           path = "/tmp/arrow-src/cpp/cmake_modules/ThirdpartyToolchain.cmake"
@@ -268,22 +265,14 @@ jobs:
           )
           match = pattern.search(content)
           if not match:
-              print("WARN: exact pattern not found, will try generic search")
-              idx = content.find('ARROW_WITH_PROTOBUF must be propagated')
-              if idx > 0:
-                  print("Context around target:")
-                  print(repr(content[max(0, idx-400):idx+400]))
+              print("WARN: exact pattern not found")
               raise SystemExit(1)
 
-          original = match.group(0)
-          patched = original.replace("FATAL_ERROR", "WARNING", 1)
+          patched = match.group(0).replace("FATAL_ERROR", "WARNING", 1)
           new_content = content[:match.start()] + patched + content[match.end():]
           open(path, "w").write(new_content)
           print("OK: FATAL_ERROR -> WARNING")
           PY
-
-          echo "=== AFTER: check ==="
-          grep -n "ARROW_WITH_PROTOBUF must be propagated" "$F" || echo "(target gone?)"
 
       - name: Patch Arrow vendored date for Android
         run: |
@@ -291,82 +280,144 @@ jobs:
           TZ_H=/tmp/arrow-src/cpp/src/arrow/vendored/datetime/tz.h
           TZ_CPP=/tmp/arrow-src/cpp/src/arrow/vendored/datetime/tz.cpp
 
-          [ -f "$TZ_H" ] || { echo "FATAL: $TZ_H not found"; exit 1; }
-          [ -f "$TZ_CPP" ] || { echo "FATAL: $TZ_CPP not found"; exit 1; }
-
-          echo "=== Patch 1: parse_from_android_tzdata 从 private 挪到 public ==="
-          grep -n "parse_from_android_tzdata" "$TZ_H" || echo "(not found)"
-
           python3 - <<'PY'
           path = "/tmp/arrow-src/cpp/src/arrow/vendored/datetime/tz.h"
           content = open(path).read()
           old = "    void parse_from_android_tzdata(std::ifstream& inf, const std::size_t off);"
           if old in content:
-              new = "public:\n" + old
-              content = content.replace(old, new, 1)
-              print("OK: made parse_from_android_tzdata public")
-          else:
-              print("WARN: exact declaration line not found")
-              idx = content.find("parse_from_android_tzdata")
-              if idx > 0:
-                  print("Context:")
-                  print(content[max(0, idx-300):idx+300])
+              content = content.replace(old, "public:\n" + old, 1)
+              print("OK: parse_from_android_tzdata public")
           open(path, "w").write(content)
           PY
 
-          echo "=== Patch 2: 替换所有 init_tzdb().release() 调用 ==="
-          echo "--- BEFORE ---"
-          grep -n "init_tzdb().release()" "$TZ_CPP" || echo "(not found)"
-
           python3 - <<'PY'
+          import re
           path = "/tmp/arrow-src/cpp/src/arrow/vendored/datetime/tz.cpp"
           content = open(path).read()
 
-          # 精确匹配两种已知形式（首参数不同）
-          replacements = [
-              (
-                  "tzdb_list::undocumented_helper::push_front(tz_db, init_tzdb().release());",
-                  "/* ARROW Android patch: init_tzdb().release() not available on this toolchain */"
-              ),
-              (
-                  "tzdb_list::undocumented_helper::push_front(get_tzdb_list(), init_tzdb().release());",
-                  "/* ARROW Android patch: init_tzdb().release() not available on this toolchain */"
-              ),
-          ]
+          for old in [
+              "tzdb_list::undocumented_helper::push_front(tz_db, init_tzdb().release());",
+              "tzdb_list::undocumented_helper::push_front(get_tzdb_list(), init_tzdb().release());",
+          ]:
+              if old in content:
+                  content = content.replace(old, "/* ARROW Android patch */")
+                  print("OK: replaced one variant")
 
-          total = 0
-          for old, new in replacements:
-              cnt = content.count(old)
-              if cnt > 0:
-                  content = content.replace(old, new)
-                  print(f"OK: replaced {cnt}x: {old[:70]}...")
-                  total += cnt
-              else:
-                  print(f"WARN: pattern not found: {old[:70]}...")
-
-          # 兜底：用正则捕捉所有剩余 init_tzdb().release()
-          import re
           leftover = re.findall(r'[^\n]*init_tzdb\(\)\.release\(\)[^\n]*', content)
           if leftover:
-              print(f"WARN: {len(leftover)} leftover init_tzdb().release() calls remain:")
-              for l in leftover[:5]:
-                  print("  " + l.strip())
-              # 全都注释掉
-              content = re.sub(
-                  r'([^\n]*init_tzdb\(\)\.release\(\)[^\n]*)',
-                  r'/* ARROW Android patch: \1 */',
-                  content
-              )
-              print("OK: commented out all remaining via regex")
+              content = re.sub(r'([^\n]*init_tzdb\(\)\.release\(\)[^\n]*)', r'/* ARROW Android patch: \1 */', content)
+              print(f"OK: regex commented out {len(leftover)} leftover(s)")
 
           open(path, "w").write(content)
-          print(f"total replacements: {total}")
           PY
 
-          echo "--- AFTER ---"
-          grep -n "init_tzdb" "$TZ_CPP" | head -20 || echo "(none)"
-          echo "--- 剩余未注释的 release 调用（应为空） ---"
-          grep -n "init_tzdb().release()" "$TZ_CPP" || echo "GOOD: none left"
+      # ============================================================
+      # 实现一个真正的 nl_langinfo 函数（API < 26 时 bionic 缺失）
+      # ============================================================
+      - name: Patch Arrow vendored musl strptime (implement nl_langinfo)
+        run: |
+          set -euo pipefail
+          F=/tmp/arrow-src/cpp/src/arrow/vendored/musl/strptime.c
+          [ -f "$F" ] || { echo "FATAL: $F not found"; exit 1; }
+
+          echo "=== BEFORE: nl_langinfo usages ==="
+          grep -n "nl_langinfo" "$F" | head -20 || echo "(not found)"
+          echo "=== includes ==="
+          grep -n "#include" "$F" | head -20
+
+          python3 - <<'PY'
+          path = "/tmp/arrow-src/cpp/src/arrow/vendored/musl/strptime.c"
+          content = open(path).read()
+
+          if "__arrow_nl_langinfo_impl" in content:
+              print("WARN: already patched, skipping")
+              raise SystemExit(0)
+
+          impl = '''
+          /* === ARROW Android patch: provide nl_langinfo() for bionic API < 26 ===
+           * bionic 从 API 26 才开始暴露 nl_langinfo()。这里实现一个同名函数，
+           * 返回硬编码的 C/POSIX locale 字符串，链接时覆盖系统符号。
+           * 用宏值做 switch，避免 include <langinfo.h>（API 24 下可能被屏蔽）。
+           */
+          #if defined(__ANDROID__) && defined(__ANDROID_API__) && (__ANDROID_API__ < 26)
+          char *nl_langinfo(int item);
+          #endif
+          '''
+
+          # 声明放在所有 include 之后，函数定义放在文件末尾
+          lines = content.split("\n")
+          insert_idx = 0
+          for i, line in enumerate(lines):
+              if line.strip().startswith("#include"):
+                  insert_idx = i + 1
+          lines.insert(insert_idx, impl)
+          content = "\n".join(lines)
+
+          # 函数定义追加到文件末尾
+          impl_def = '''
+
+          /* === ARROW Android patch: nl_langinfo implementation === */
+          #if defined(__ANDROID__) && defined(__ANDROID_API__) && (__ANDROID_API__ < 26)
+          char *nl_langinfo(int item) {
+              switch (item) {
+                  case CODESET:    return (char *)"UTF-8";
+                  case D_T_FMT:    return (char *)"%a %b %e %H:%M:%S %Y";
+                  case D_FMT:      return (char *)"%m/%d/%y";
+                  case T_FMT:      return (char *)"%H:%M:%S";
+                  case T_FMT_AMPM: return (char *)"%I:%M:%S %p";
+                  case AM_STR:     return (char *)"AM";
+                  case PM_STR:     return (char *)"PM";
+                  case ABDAY_1: return (char *)"Sun";
+                  case ABDAY_2: return (char *)"Mon";
+                  case ABDAY_3: return (char *)"Tue";
+                  case ABDAY_4: return (char *)"Wed";
+                  case ABDAY_5: return (char *)"Thu";
+                  case ABDAY_6: return (char *)"Fri";
+                  case ABDAY_7: return (char *)"Sat";
+                  case DAY_1: return (char *)"Sunday";
+                  case DAY_2: return (char *)"Monday";
+                  case DAY_3: return (char *)"Tuesday";
+                  case DAY_4: return (char *)"Wednesday";
+                  case DAY_5: return (char *)"Thursday";
+                  case DAY_6: return (char *)"Friday";
+                  case DAY_7: return (char *)"Saturday";
+                  case ABMON_1: return (char *)"Jan";
+                  case ABMON_2: return (char *)"Feb";
+                  case ABMON_3: return (char *)"Mar";
+                  case ABMON_4: return (char *)"Apr";
+                  case ABMON_5: return (char *)"May";
+                  case ABMON_6: return (char *)"Jun";
+                  case ABMON_7: return (char *)"Jul";
+                  case ABMON_8: return (char *)"Aug";
+                  case ABMON_9: return (char *)"Sep";
+                  case ABMON_10: return (char *)"Oct";
+                  case ABMON_11: return (char *)"Nov";
+                  case ABMON_12: return (char *)"Dec";
+                  case MON_1: return (char *)"January";
+                  case MON_2: return (char *)"February";
+                  case MON_3: return (char *)"March";
+                  case MON_4: return (char *)"April";
+                  case MON_5: return (char *)"May";
+                  case MON_6: return (char *)"June";
+                  case MON_7: return (char *)"July";
+                  case MON_8: return (char *)"August";
+                  case MON_9: return (char *)"September";
+                  case MON_10: return (char *)"October";
+                  case MON_11: return (char *)"November";
+                  case MON_12: return (char *)"December";
+                  default: return (char *)"";
+              }
+          }
+          #endif
+          /* === end ARROW Android patch === */
+          '''
+          content = content + impl_def
+          open(path, "w").write(content)
+          print("OK: nl_langinfo implementation added")
+          PY
+
+          echo "=== AFTER: check ==="
+          grep -n "nl_langinfo" "$F" | head -20
 
       # ============================================================
       # Stage 1: 编译 libarrow C++ 库
