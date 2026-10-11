@@ -175,7 +175,7 @@ jobs:
           DIST_DIR="/opt/chaquopy/server/pypi/dist"
           mkdir -p "$DIST_DIR/numpy" "$DIST_DIR/chaquopy-libcxx"
           
-          # 从用户提供的 URL 拉取 NumPy wheel
+          # 从自己的 URL 拉取 NumPy wheel
           NUMPY_URL="https://github.com/Ruixu-Account/chaquopy-android-wheels/releases/download/latest/numpy-2.5.3-0-cp312-cp312-android_24_arm64_v8a.whl"
           wget -q "$NUMPY_URL" -O "$DIST_DIR/numpy/numpy-2.5.3-0-cp312-cp312-android_24_arm64_v8a.whl"
           
@@ -247,7 +247,7 @@ jobs:
               - ninja 1.11.1
               - scikit-build-core 0.10.7
               - numpy 2.5.3
-              - cython 3.0.11
+              - cython 3.1.0
             host:
               - python
               - numpy 2.5.3
