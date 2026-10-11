@@ -97,7 +97,6 @@ jobs:
                       print(f"Chaquopy: numpy_include = {numpy_include}")
                       print(f"Chaquopy: arrow_prefix = {arrow_prefix}")
 
-                      # 自动探测 ArrowConfig.cmake，兼容 Arrow/arrow 各种大小写
                       arrow_dir = None
                       cmake_root = f"{arrow_prefix}/lib/cmake"
                       if os.path.isdir(cmake_root):
@@ -181,6 +180,64 @@ jobs:
           python3 /tmp/patch_bw.py
           wc -l /tmp/patch_bw.py
 
+      # ============================================================
+      # V21 新增：扩展 compiler-wrapper.py 的白名单
+      # Chaquopy 会过滤编译器命令行里的 -I/-L 参数，只保留 valid_dirs 下的路径。
+      # scikit-build-core 自动生成的临时 build 目录在 /tmp 下，
+      # host Python 头文件在 /opt/hostedtoolcache 下，
+      # 二者都不在白名单里，所以要把这两个目录加进去。
+      # ============================================================
+      - name: Patch Chaquopy compiler-wrapper.py (extend whitelist)
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import glob, re
+
+          candidates = glob.glob("/opt/chaquopy/**/compiler-wrapper.py", recursive=True)
+          print(f"Found compiler-wrapper.py: {candidates}")
+          if not candidates:
+              raise SystemExit("FATAL: compiler-wrapper.py not found")
+
+          for p in candidates:
+              content = open(p).read()
+              if "PATCHED_BY_V21" in content:
+                  print(f"Already patched: {p}")
+                  continue
+
+              m = re.search(
+                  r'(^[ \t]*valid_dirs\s*=\s*\[[^\]]*\])',
+                  content,
+                  re.MULTILINE,
+              )
+              if not m:
+                  print(f"WARN: valid_dirs not found in {p}")
+                  idx = content.find("valid_dirs")
+                  if idx > 0:
+                      print("Context:")
+                      print(content[max(0, idx-200):idx+300])
+                  continue
+
+              original = m.group(1)
+              appended = (
+                  original
+                  + "\n# PATCHED_BY_V21: extend whitelist\n"
+                  + "valid_dirs.append('/tmp')\n"
+                  + "valid_dirs.append('/opt/hostedtoolcache')\n"
+                  + "valid_dirs.append('/opt/chaquopy')\n"
+              )
+              content = content.replace(original, appended, 1)
+              open(p, "w").write(content)
+              print(f"OK: patched {p}")
+              print(f"  original: {original!r}")
+          PY
+
+          echo ""
+          echo "=== Verify patch ==="
+          for p in $(find /opt/chaquopy -name "compiler-wrapper.py"); do
+            echo "--- $p ---"
+            grep -n -A6 "PATCHED_BY_V21" "$p" || true
+          done
+
       - name: Download Android Python target
         run: |
           cd /opt/chaquopy
@@ -246,7 +303,7 @@ jobs:
           [ -f python/CMakeLists.txt ] || { echo "FATAL: python/CMakeLists.txt missing"; exit 1; }
           [ -f python/pyproject.toml ] || { echo "FATAL: python/pyproject.toml missing"; exit 1; }
 
-          echo "=== PATCH_V20_MARKER ==="
+          echo "=== PATCH_V21_MARKER ==="
           rm -rf python/cmake_modules
           cp -a cpp/cmake_modules python/cmake_modules
 
@@ -442,9 +499,6 @@ jobs:
           print("OK: nl_langinfo implementation added")
           PY
 
-      # ============================================================
-      # Stage 1: 编译 libarrow C++ 库
-      # ============================================================
       - name: Build libarrow C++ (stage 1)
         run: |
           set -euo pipefail
