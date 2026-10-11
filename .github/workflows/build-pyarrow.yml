@@ -85,24 +85,49 @@ jobs:
           old3 = '            return self.builder.build("wheel", "dist")'
           new3 = '''            py_include = f"{self.host_env}/chaquopy/include/python{self.python}"
                       py_lib = f"{self.host_env}/chaquopy/lib/libpython{self.python}.so"
-                      import os, sys
+                      import os, sys, glob
                       host_python = sys.executable
                       hp = "/opt/hostedtoolcache/Python/3.12.15/x64/bin/python3.12"
                       if os.path.exists(hp): host_python = hp
 
-                      # 全部路径都在 /opt/chaquopy/server/pypi/ 白名单下，
-                      # 不会被 compiler-wrapper.py 过滤
                       numpy_include = "/opt/chaquopy/server/pypi/numpy-include/numpy/_core/include"
                       arrow_prefix = "/opt/chaquopy/server/pypi/arrow-install"
-                      arrow_dir = f"{arrow_prefix}/lib/cmake/arrow"
                       arrow_include = f"{arrow_prefix}/include"
 
                       print(f"Chaquopy: numpy_include = {numpy_include}")
                       print(f"Chaquopy: arrow_prefix = {arrow_prefix}")
-                      print(f"Chaquopy: arrow_dir = {arrow_dir}")
-                      assert os.path.isdir(numpy_include), f"missing {numpy_include}"
+
+                      # 自动探测 ArrowConfig.cmake，兼容 Arrow/arrow 各种大小写
+                      arrow_dir = None
+                      cmake_root = f"{arrow_prefix}/lib/cmake"
+                      if os.path.isdir(cmake_root):
+                          for name in sorted(os.listdir(cmake_root)):
+                              cand = f"{cmake_root}/{name}"
+                              if os.path.isfile(f"{cand}/ArrowConfig.cmake"):
+                                  arrow_dir = cand
+                                  print(f"Chaquopy: ArrowConfig.cmake found via listdir: {cand}")
+                                  break
+                      if arrow_dir is None:
+                          hits = glob.glob(f"{arrow_prefix}/**/ArrowConfig.cmake", recursive=True)
+                          if hits:
+                              arrow_dir = os.path.dirname(hits[0])
+                              print(f"Chaquopy: ArrowConfig.cmake found via glob: {hits[0]}")
+                      if arrow_dir is None:
+                          print("Chaquopy: arrow_install tree (depth<=3):")
+                          for root, dirs, files in os.walk(arrow_prefix):
+                              depth = root[len(arrow_prefix):].count(os.sep)
+                              if depth > 3:
+                                  dirs[:] = []
+                                  continue
+                              print(f"  {root}")
+                              for f in files[:30]:
+                                  print(f"    {f}")
+
+                      assert arrow_dir is not None, f"ArrowConfig.cmake not found under {arrow_prefix}"
                       assert os.path.isdir(arrow_dir), f"missing {arrow_dir}"
+                      assert os.path.isdir(numpy_include), f"missing {numpy_include}"
                       assert os.path.isdir(arrow_include), f"missing {arrow_include}"
+                      print(f"Chaquopy: arrow_dir = {arrow_dir}")
 
                       return self.builder.build("wheel", "dist", config_settings={
                           "cmake.define.CMAKE_PREFIX_PATH": arrow_prefix,
@@ -201,7 +226,6 @@ jobs:
           NUMPY_URL="https://github.com/Ruixu-Account/chaquopy-android-wheels/releases/download/latest/numpy-2.5.3-0-cp312-cp312-android_24_arm64_v8a.whl"
           wget -q "$NUMPY_URL" -O "$DIST_DIR/numpy/numpy-2.5.3-0-cp312-cp312-android_24_arm64_v8a.whl"
 
-          # 解压到 Chaquopy 白名单目录下，避免 compiler-wrapper.py 过滤
           NUMPY_INC=/opt/chaquopy/server/pypi/numpy-include
           rm -rf "$NUMPY_INC"
           mkdir -p "$NUMPY_INC"
@@ -222,7 +246,7 @@ jobs:
           [ -f python/CMakeLists.txt ] || { echo "FATAL: python/CMakeLists.txt missing"; exit 1; }
           [ -f python/pyproject.toml ] || { echo "FATAL: python/pyproject.toml missing"; exit 1; }
 
-          echo "=== PATCH_V19_MARKER ==="
+          echo "=== PATCH_V20_MARKER ==="
           rm -rf python/cmake_modules
           cp -a cpp/cmake_modules python/cmake_modules
 
@@ -420,7 +444,6 @@ jobs:
 
       # ============================================================
       # Stage 1: 编译 libarrow C++ 库
-      # 【V19 关键改动】ARROW_HOME 从 /tmp 挪到 Chaquopy 白名单目录
       # ============================================================
       - name: Build libarrow C++ (stage 1)
         run: |
@@ -432,8 +455,6 @@ jobs:
           SYSROOT="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
 
           [ -f "$TOOLCHAIN" ] || { echo "FATAL: NDK toolchain missing"; exit 1; }
-          echo "ARROW_HOME: $ARROW_HOME"
-          echo "TOOLCHAIN: $TOOLCHAIN"
 
           ZLIB_INC=""
           ZLIB_LIB=""
@@ -530,7 +551,7 @@ jobs:
 
           echo ""
           echo "=== $ARROW_HOME layout ==="
-          find "$ARROW_HOME" -maxdepth 3 -type d | head -30
+          find "$ARROW_HOME" -maxdepth 4 -type d | head -40
           echo "=== ArrowConfig.cmake ==="
           find "$ARROW_HOME" -name "ArrowConfig.cmake" -o -name "arrow-config.cmake" || echo "(not found!)"
 
