@@ -353,7 +353,32 @@ jobs:
           PYPI_DIR="$CHAQUOPY_ROOT/server/pypi"
           RECIPE_DIR="$PYPI_DIR/packages/astrbot-scipy"
           LOG="/tmp/build-scipy.log"
+          SCIPY_VERSION="${{ inputs.scipy_version }}"
+          SCIPY_TAR="/tmp/scipy-${SCIPY_VERSION}.tar.gz"
+          SCIPY_SRC="/tmp/scipy-src"
 
+          # 1. 下载并解压 SciPy 源码
+          echo "Downloading SciPy ${SCIPY_VERSION} source..."
+          wget -q --tries=3 --timeout=300 "https://files.pythonhosted.org/packages/source/s/scipy/scipy-${SCIPY_VERSION}.tar.gz" -O "$SCIPY_TAR"
+          rm -rf "$SCIPY_SRC"
+          mkdir -p "$SCIPY_SRC"
+          tar -xzf "$SCIPY_TAR" -C "$SCIPY_SRC" --strip-components=1
+
+          # 2. 给 _complexstuff.h 打补丁
+          COMPLEXSTUFF_HEADER="$SCIPY_SRC/scipy/special/_complexstuff.h"
+          if [ -f "$COMPLEXSTUFF_HEADER" ]; then
+            if ! grep -q '#include <complex.h>' "$COMPLEXSTUFF_HEADER"; then
+              sed -i '1i #include <complex.h>' "$COMPLEXSTUFF_HEADER"
+              echo "✅ Patched $COMPLEXSTUFF_HEADER"
+            else
+              echo "ℹ️ _complexstuff.h already includes <complex.h>"
+            fi
+          else
+            echo "❌ Could not locate _complexstuff.h at $COMPLEXSTUFF_HEADER"
+            exit 1
+          fi
+
+          # 3. 修改 meta.yaml 指向本地源码
           rm -rf "$RECIPE_DIR"
           mkdir -p "$RECIPE_DIR"
 
@@ -362,7 +387,7 @@ jobs:
             name: scipy
             version: "${{ inputs.scipy_version }}"
           source:
-            url: https://files.pythonhosted.org/packages/source/s/scipy/scipy-${{ inputs.scipy_version }}.tar.gz
+            path: $SCIPY_SRC
           build:
             number: 0
             script_env:
@@ -379,6 +404,7 @@ jobs:
               - chaquopy-openblas 0.2.20
           EOF
 
+          # 4. 构建
           cd "$PYPI_DIR"
           if ! python build-wheel.py \
                 --python 3.12 \
