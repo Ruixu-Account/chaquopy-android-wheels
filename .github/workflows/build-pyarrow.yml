@@ -208,7 +208,7 @@ jobs:
           [ -f python/CMakeLists.txt ] || { echo "FATAL: python/CMakeLists.txt missing"; exit 1; }
           [ -f python/pyproject.toml ] || { echo "FATAL: python/pyproject.toml missing"; exit 1; }
 
-          echo "=== PATCH_V9_MARKER ==="
+          echo "=== PATCH_V10_MARKER ==="
           rm -rf python/cmake_modules
           cp -a cpp/cmake_modules python/cmake_modules
 
@@ -314,30 +314,59 @@ jobs:
           open(path, "w").write(content)
           PY
 
-          echo "=== Patch 2: tz.cpp:608 删掉 init_tzdb().release() 调用 ==="
+          echo "=== Patch 2: 替换所有 init_tzdb().release() 调用 ==="
+          echo "--- BEFORE ---"
           grep -n "init_tzdb().release()" "$TZ_CPP" || echo "(not found)"
 
           python3 - <<'PY'
           path = "/tmp/arrow-src/cpp/src/arrow/vendored/datetime/tz.cpp"
           content = open(path).read()
-          old = "tzdb_list::undocumented_helper::push_front(tz_db, init_tzdb().release());"
-          if old in content:
-              new = "/* ARROW Android patch: init_tzdb() and tzdb::release() not available on this toolchain */"
-              content = content.replace(old, new, 1)
-              print("OK: commented out init_tzdb().release()")
-          else:
-              print("WARN: init_tzdb().release() line not found")
-              idx = content.find("init_tzdb")
-              if idx >= 0:
-                  print("Context:")
-                  print(content[max(0, idx-300):idx+300])
+
+          # 精确匹配两种已知形式（首参数不同）
+          replacements = [
+              (
+                  "tzdb_list::undocumented_helper::push_front(tz_db, init_tzdb().release());",
+                  "/* ARROW Android patch: init_tzdb().release() not available on this toolchain */"
+              ),
+              (
+                  "tzdb_list::undocumented_helper::push_front(get_tzdb_list(), init_tzdb().release());",
+                  "/* ARROW Android patch: init_tzdb().release() not available on this toolchain */"
+              ),
+          ]
+
+          total = 0
+          for old, new in replacements:
+              cnt = content.count(old)
+              if cnt > 0:
+                  content = content.replace(old, new)
+                  print(f"OK: replaced {cnt}x: {old[:70]}...")
+                  total += cnt
+              else:
+                  print(f"WARN: pattern not found: {old[:70]}...")
+
+          # 兜底：用正则捕捉所有剩余 init_tzdb().release()
+          import re
+          leftover = re.findall(r'[^\n]*init_tzdb\(\)\.release\(\)[^\n]*', content)
+          if leftover:
+              print(f"WARN: {len(leftover)} leftover init_tzdb().release() calls remain:")
+              for l in leftover[:5]:
+                  print("  " + l.strip())
+              # 全都注释掉
+              content = re.sub(
+                  r'([^\n]*init_tzdb\(\)\.release\(\)[^\n]*)',
+                  r'/* ARROW Android patch: \1 */',
+                  content
+              )
+              print("OK: commented out all remaining via regex")
+
           open(path, "w").write(content)
+          print(f"total replacements: {total}")
           PY
 
-          echo "=== AFTER Patch 1 ==="
-          grep -n -B1 "parse_from_android_tzdata" "$TZ_H" | head -10
-          echo "=== AFTER Patch 2 ==="
-          grep -n "init_tzdb" "$TZ_CPP" | head -10 || echo "(none)"
+          echo "--- AFTER ---"
+          grep -n "init_tzdb" "$TZ_CPP" | head -20 || echo "(none)"
+          echo "--- 剩余未注释的 release 调用（应为空） ---"
+          grep -n "init_tzdb().release()" "$TZ_CPP" || echo "GOOD: none left"
 
       # ============================================================
       # Stage 1: 编译 libarrow C++ 库
