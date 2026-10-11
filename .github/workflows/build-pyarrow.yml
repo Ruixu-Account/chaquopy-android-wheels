@@ -101,7 +101,6 @@ jobs:
                           "cmake.define.ARROW_BUILD_EXAMPLES": "OFF",
                           "cmake.define.ARROW_BUILD_STATIC": "OFF",
                           "cmake.define.ARROW_BUILD_SHARED": "ON",
-                          "cmake.define.ARROW_DEPENDENCY_SOURCE": "BUNDLED",
                           "cmake.define.ARROW_JEMALLOC": "OFF",
                           "cmake.define.ARROW_SIMD_LEVEL": "NONE",
                           "cmake.define.ARROW_RUNTIME_SIMD_LEVEL": "NONE",
@@ -198,45 +197,64 @@ jobs:
           wget -q "https://chaquo.com/pypi-13.1/chaquopy-libcxx/chaquopy_libcxx-180000-0-py3-none-android_24_arm64_v8a.whl" -O "$DIST_DIR/chaquopy-libcxx/chaquopy_libcxx-180000-0-py3-none-android_24_arm64_v8a.whl"
           find "$DIST_DIR" -name "*.whl" -exec ls -la {} \;
 
-      - name: Download and patch pyarrow sdist
+      - name: Clone and patch pyarrow source
         run: |
           set -euo pipefail
           cd /tmp
-          rm -rf pyarrow-sdist
-          mkdir -p pyarrow-sdist
-          SDIST_URL="https://files.pythonhosted.org/packages/source/p/pyarrow/pyarrow-${{ inputs.pyarrow_version }}.tar.gz"
-          echo "Downloading sdist: $SDIST_URL"
-          wget -q --tries=3 --timeout=600 "$SDIST_URL" -O /tmp/pyarrow-sdist.tar.gz
-          ls -la /tmp/pyarrow-sdist.tar.gz
-          tar -xzf /tmp/pyarrow-sdist.tar.gz -C /tmp/pyarrow-sdist --strip-components=1
+          rm -rf arrow-src
+          git clone --depth 1 --branch apache-arrow-${{ inputs.pyarrow_version }} https://github.com/apache/arrow.git arrow-src
+          cd arrow-src
+          [ -f cpp/CMakeLists.txt ] || { echo "FATAL: cpp/CMakeLists.txt missing"; exit 1; }
+          [ -f python/CMakeLists.txt ] || { echo "FATAL: python/CMakeLists.txt missing"; exit 1; }
+          [ -f python/pyproject.toml ] || { echo "FATAL: python/pyproject.toml missing"; exit 1; }
 
-          cd /tmp/pyarrow-sdist
-          echo "=== PATCH_V5_MARKER ==="
-          echo "=== sdist root layout ==="
-          ls -la | head -30
-          echo "=== cpp/ ==="
-          ls cpp/CMakeLists.txt 2>&1 || echo "MISSING cpp/CMakeLists.txt"
-          echo "=== python/ ==="
-          ls python/CMakeLists.txt 2>&1 || echo "MISSING python/CMakeLists.txt"
-          echo "=== pyproject.toml ==="
-          ls pyproject.toml 2>&1 || echo "MISSING pyproject.toml"
+          echo "=== PATCH_V6_MARKER ==="
+          echo "=== Patch 0: cpp/cmake_modules -> python/cmake_modules ==="
+          rm -rf python/cmake_modules
+          cp -a cpp/cmake_modules python/cmake_modules
+          ls python/cmake_modules/ | head -5
 
-          echo "=== Patch license ==="
-          grep -n "^license" pyproject.toml || echo "(none)"
+          echo "=== Patch 1: pyproject.toml license ==="
+          grep -n "^license" python/pyproject.toml || echo "(none)"
           python3 - <<'PY'
           import re
-          path = "pyproject.toml"
+          path = "python/pyproject.toml"
           content = open(path).read()
           new_content = re.sub(r'^license\s*=\s*"([^"]+)"', r'license = {text = "\1"}', content, flags=re.MULTILINE)
           print("OK: license patched" if new_content != content else "WARN: no license change")
           open(path, "w").write(new_content)
           PY
-          grep -n "^license" pyproject.toml || echo "(none)"
+          grep -n "^license" python/pyproject.toml || echo "(none)"
+
+          echo "=== Patch 2: python/CMakeLists.txt ==="
+          python3 - <<'PY'
+          import re
+          path = "python/CMakeLists.txt"
+          content = open(path).read()
+
+          content = content.replace('../cpp/cmake_modules', 'cmake_modules')
+          content = content.replace('${CMAKE_SOURCE_DIR}/../cpp/cmake_modules', '${CMAKE_SOURCE_DIR}/cmake_modules')
+          content = content.replace('${CMAKE_CURRENT_SOURCE_DIR}/../cpp/cmake_modules', '${CMAKE_CURRENT_SOURCE_DIR}/cmake_modules')
+
+          old_alt = 'find_package(Python3Alt REQUIRED)'
+          new_alt = '''set(Python3_NumPy_INCLUDE_DIR "/tmp/numpy-include/numpy/_core/include")
+          set(Python3_NumPy_INCLUDE_DIRS "/tmp/numpy-include/numpy/_core/include")
+          set(Python3_NumPy_VERSION "2.5.3")
+          set(Python3_VERSION "3.12.12")
+          set(Python3_EXECUTABLE "/opt/hostedtoolcache/Python/3.12.15/x64/bin/python3.12")
+          set(Cython_VERSION "3.1.0")'''
+          if old_alt in content:
+              content = content.replace(old_alt, new_alt, 1)
+              print("OK: replaced find_package(Python3Alt)")
+          else:
+              print("WARN: find_package(Python3Alt) not found")
+
+          open(path, "w").write(content)
+          print("OK: patched")
+          PY
 
       # ============================================================
-      # Stage 1: 编译 libarrow C++ 库
-      # pyarrow 的 python 绑定需要 find_package(Arrow) 找到已安装的 libarrow
-      # 所以必须先把 cpp/ 编好装到 /tmp/arrow-install
+      # Stage 1: 编译 libarrow C++ 库（git clone 的 cpp/ 目录）
       # ============================================================
       - name: Build libarrow C++ (stage 1)
         run: |
@@ -249,7 +267,7 @@ jobs:
           rm -rf "$ARROW_HOME" "$BUILD_DIR"
           mkdir -p "$ARROW_HOME" "$BUILD_DIR"
 
-          cd /tmp/pyarrow-sdist/cpp
+          cd /tmp/arrow-src/cpp
 
           set +e
           cmake -B "$BUILD_DIR" -S . -G Ninja \
@@ -314,7 +332,7 @@ jobs:
           fi
 
           set +e
-          cmake --build "$BUILD_DIR" --target install -j2 2>&1 | tee -a "$LOG"
+          cmake --build "$BUILD_DIR" --target install -j4 2>&1 | tee -a "$LOG"
           BUILD_RC=${PIPESTATUS[0]}
           set -e
           echo ""
@@ -341,7 +359,7 @@ jobs:
             name: pyarrow
             version: "${{ inputs.pyarrow_version }}"
           source:
-            path: /tmp/pyarrow-sdist
+            path: /tmp/arrow-src/python
           build:
             number: 0
           requirements:
