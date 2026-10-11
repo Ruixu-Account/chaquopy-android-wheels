@@ -102,6 +102,7 @@ jobs:
                           "cmake.define.ARROW_BUILD_STATIC": "OFF",
                           "cmake.define.ARROW_BUILD_SHARED": "ON",
                           "cmake.define.ARROW_JEMALLOC": "OFF",
+                          "cmake.define.ARROW_MIMALLOC": "OFF",
                           "cmake.define.ARROW_SIMD_LEVEL": "NONE",
                           "cmake.define.ARROW_RUNTIME_SIMD_LEVEL": "NONE",
                           "cmake.define.ARROW_COMPUTE": "ON",
@@ -208,7 +209,7 @@ jobs:
           [ -f python/CMakeLists.txt ] || { echo "FATAL: python/CMakeLists.txt missing"; exit 1; }
           [ -f python/pyproject.toml ] || { echo "FATAL: python/pyproject.toml missing"; exit 1; }
 
-          echo "=== PATCH_V12_MARKER ==="
+          echo "=== PATCH_V13_MARKER ==="
           rm -rf python/cmake_modules
           cp -a cpp/cmake_modules python/cmake_modules
 
@@ -252,13 +253,10 @@ jobs:
         run: |
           set -euo pipefail
           F=/tmp/arrow-src/cpp/cmake_modules/ThirdpartyToolchain.cmake
-          [ -f "$F" ] || { echo "FATAL: $F not found"; exit 1; }
-
           python3 - <<'PY'
           import re
           path = "/tmp/arrow-src/cpp/cmake_modules/ThirdpartyToolchain.cmake"
           content = open(path).read()
-
           pattern = re.compile(
               r'message\(\s*FATAL_ERROR\s+"(ARROW_WITH_PROTOBUF must be propagated[^"]*)"',
               re.DOTALL
@@ -267,7 +265,6 @@ jobs:
           if not match:
               print("WARN: exact pattern not found")
               raise SystemExit(1)
-
           patched = match.group(0).replace("FATAL_ERROR", "WARNING", 1)
           new_content = content[:match.start()] + patched + content[match.end():]
           open(path, "w").write(new_content)
@@ -277,9 +274,6 @@ jobs:
       - name: Patch Arrow vendored date for Android
         run: |
           set -euo pipefail
-          TZ_H=/tmp/arrow-src/cpp/src/arrow/vendored/datetime/tz.h
-          TZ_CPP=/tmp/arrow-src/cpp/src/arrow/vendored/datetime/tz.cpp
-
           python3 - <<'PY'
           path = "/tmp/arrow-src/cpp/src/arrow/vendored/datetime/tz.h"
           content = open(path).read()
@@ -294,7 +288,6 @@ jobs:
           import re
           path = "/tmp/arrow-src/cpp/src/arrow/vendored/datetime/tz.cpp"
           content = open(path).read()
-
           for old in [
               "tzdb_list::undocumented_helper::push_front(tz_db, init_tzdb().release());",
               "tzdb_list::undocumented_helper::push_front(get_tzdb_list(), init_tzdb().release());",
@@ -302,49 +295,33 @@ jobs:
               if old in content:
                   content = content.replace(old, "/* ARROW Android patch */")
                   print("OK: replaced one variant")
-
           leftover = re.findall(r'[^\n]*init_tzdb\(\)\.release\(\)[^\n]*', content)
           if leftover:
               content = re.sub(r'([^\n]*init_tzdb\(\)\.release\(\)[^\n]*)', r'/* ARROW Android patch: \1 */', content)
               print(f"OK: regex commented out {len(leftover)} leftover(s)")
-
           open(path, "w").write(content)
           PY
 
-      # ============================================================
-      # 实现一个真正的 nl_langinfo 函数（API < 26 时 bionic 缺失）
-      # ============================================================
       - name: Patch Arrow vendored musl strptime (implement nl_langinfo)
         run: |
           set -euo pipefail
           F=/tmp/arrow-src/cpp/src/arrow/vendored/musl/strptime.c
           [ -f "$F" ] || { echo "FATAL: $F not found"; exit 1; }
 
-          echo "=== BEFORE: nl_langinfo usages ==="
-          grep -n "nl_langinfo" "$F" | head -20 || echo "(not found)"
-          echo "=== includes ==="
-          grep -n "#include" "$F" | head -20
-
           python3 - <<'PY'
           path = "/tmp/arrow-src/cpp/src/arrow/vendored/musl/strptime.c"
           content = open(path).read()
 
           if "__arrow_nl_langinfo_impl" in content:
-              print("WARN: already patched, skipping")
+              print("WARN: already patched")
               raise SystemExit(0)
 
           impl = '''
-          /* === ARROW Android patch: provide nl_langinfo() for bionic API < 26 ===
-           * bionic 从 API 26 才开始暴露 nl_langinfo()。这里实现一个同名函数，
-           * 返回硬编码的 C/POSIX locale 字符串，链接时覆盖系统符号。
-           * 用宏值做 switch，避免 include <langinfo.h>（API 24 下可能被屏蔽）。
-           */
+          /* === ARROW Android patch: provide nl_langinfo() for bionic API < 26 === */
           #if defined(__ANDROID__) && defined(__ANDROID_API__) && (__ANDROID_API__ < 26)
           char *nl_langinfo(int item);
           #endif
           '''
-
-          # 声明放在所有 include 之后，函数定义放在文件末尾
           lines = content.split("\n")
           insert_idx = 0
           for i, line in enumerate(lines):
@@ -353,7 +330,6 @@ jobs:
           lines.insert(insert_idx, impl)
           content = "\n".join(lines)
 
-          # 函数定义追加到文件末尾
           impl_def = '''
 
           /* === ARROW Android patch: nl_langinfo implementation === */
@@ -416,19 +392,22 @@ jobs:
           print("OK: nl_langinfo implementation added")
           PY
 
-          echo "=== AFTER: check ==="
-          grep -n "nl_langinfo" "$F" | head -20
-
       # ============================================================
       # Stage 1: 编译 libarrow C++ 库
+      # 【V13 关键改动】改用 NDK 官方 toolchain file
+      # 让 ExternalProject_Add 的依赖（mimalloc/zlib 等）也走交叉编译
+      # 同时关掉 mimalloc（Android 用 bionic 自己的分配器）
       # ============================================================
       - name: Build libarrow C++ (stage 1)
         run: |
           set -euo pipefail
-          NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
           ARROW_HOME=/tmp/arrow-install
           BUILD_DIR=/tmp/arrow-cpp-build
           LOG=/tmp/build-arrow-cpp.log
+          TOOLCHAIN="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake"
+
+          [ -f "$TOOLCHAIN" ] || { echo "FATAL: NDK toolchain file missing: $TOOLCHAIN"; exit 1; }
+          echo "Using NDK toolchain: $TOOLCHAIN"
 
           rm -rf "$ARROW_HOME" "$BUILD_DIR"
           mkdir -p "$ARROW_HOME" "$BUILD_DIR"
@@ -437,18 +416,12 @@ jobs:
 
           set +e
           cmake -B "$BUILD_DIR" -S . -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-24 \
+            -DANDROID_STL=c++_shared \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="$ARROW_HOME" \
-            -DCMAKE_C_COMPILER="$NDK_BIN/aarch64-linux-android24-clang" \
-            -DCMAKE_CXX_COMPILER="$NDK_BIN/aarch64-linux-android24-clang++" \
-            -DCMAKE_SYSTEM_NAME=Android \
-            -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
-            -DCMAKE_ANDROID_ARCH_ABI=arm64-v8a \
-            -DCMAKE_ANDROID_API=24 \
-            -DCMAKE_ANDROID_NDK="$ANDROID_NDK_HOME" \
-            -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
-            -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
-            -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
             -DARROW_BUILD_TESTS=OFF \
             -DARROW_BUILD_BENCHMARKS=OFF \
             -DARROW_BUILD_EXAMPLES=OFF \
@@ -457,6 +430,7 @@ jobs:
             -DARROW_DEPENDENCY_SOURCE=BUNDLED \
             -DARROW_DEPENDENCY_USE_SHARED=ON \
             -DARROW_JEMALLOC=OFF \
+            -DARROW_MIMALLOC=OFF \
             -DARROW_SIMD_LEVEL=NONE \
             -DARROW_RUNTIME_SIMD_LEVEL=NONE \
             -DARROW_COMPUTE=ON \
