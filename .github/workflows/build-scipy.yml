@@ -77,7 +77,43 @@ jobs:
           /opt/android-gfortran/bin/aarch64-linux-android-gfortran --version | head -1
 
       # ============================================================
-      # ld wrapper：过滤 GNU ld 特有参数
+      # C 编译器 wrapper：给所有 .c 文件强制注入 -include complex.h
+      # 绕过 Meson 对 c_args 的过滤
+      # ============================================================
+      - name: Create C compiler wrapper (inject complex.h)
+        run: |
+          set -euo pipefail
+          NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          WRAP=/tmp/clang-wrapper
+          mkdir -p "$WRAP"
+
+          cat > "$WRAP/aarch64-linux-android${ANDROID_API_LEVEL}-clang" <<EOF
+          #!/bin/bash
+          # 真 clang
+          REAL_CLANG="${NDK_BIN}/aarch64-linux-android${ANDROID_API_LEVEL}-clang"
+
+          # 检测参数里是否包含 .c 文件（纯 C 编译）
+          is_c=false
+          for arg in "\$@"; do
+            case "\$arg" in
+              *.c) is_c=true; break ;;
+            esac
+          done
+
+          if \$is_c; then
+            # 只给 C 编译注入 complex.h；C++ 不动
+            exec "\$REAL_CLANG" -include complex.h "\$@"
+          else
+            exec "\$REAL_CLANG" "\$@"
+          fi
+          EOF
+          chmod +x "$WRAP/aarch64-linux-android${ANDROID_API_LEVEL}-clang"
+
+          # 打印一下验证
+          "$WRAP/aarch64-linux-android${ANDROID_API_LEVEL}-clang" --version | head -1
+
+      # ============================================================
+      # ld / as wrapper（保留原来的逻辑）
       # ============================================================
       - name: Recreate ld/as wrappers for gfortran toolchain
         run: |
@@ -320,7 +356,7 @@ jobs:
 
           cat > "$CROSS_FILE" <<EOF
           [binaries]
-          c = '${NDK_BIN}/aarch64-linux-android${ANDROID_API_LEVEL}-clang'
+          c = '/tmp/clang-wrapper/aarch64-linux-android${ANDROID_API_LEVEL}-clang'
           cpp = '${NDK_BIN}/aarch64-linux-android${ANDROID_API_LEVEL}-clang++'
           fortran = '/opt/android-gfortran/bin/aarch64-linux-android-gfortran'
           ar = '${NDK_BIN}/llvm-ar'
@@ -341,7 +377,7 @@ jobs:
           needs_exe_wrapper = true
 
           [built-in options]
-          c_args = ['-D__BIONIC_NO_PAGE_SIZE_MACRO', '-include', 'complex.h']
+          c_args = ['-D__BIONIC_NO_PAGE_SIZE_MACRO']
           cpp_args = ['-D__BIONIC_NO_PAGE_SIZE_MACRO']
           EOF
 
@@ -353,32 +389,7 @@ jobs:
           PYPI_DIR="$CHAQUOPY_ROOT/server/pypi"
           RECIPE_DIR="$PYPI_DIR/packages/astrbot-scipy"
           LOG="/tmp/build-scipy.log"
-          SCIPY_VERSION="${{ inputs.scipy_version }}"
-          SCIPY_TAR="/tmp/scipy-${SCIPY_VERSION}.tar.gz"
-          SCIPY_SRC="/tmp/scipy-src"
 
-          # 1. 下载并解压 SciPy 源码
-          echo "Downloading SciPy ${SCIPY_VERSION} source..."
-          wget -q --tries=3 --timeout=300 "https://files.pythonhosted.org/packages/source/s/scipy/scipy-${SCIPY_VERSION}.tar.gz" -O "$SCIPY_TAR"
-          rm -rf "$SCIPY_SRC"
-          mkdir -p "$SCIPY_SRC"
-          tar -xzf "$SCIPY_TAR" -C "$SCIPY_SRC" --strip-components=1
-
-          # 2. 给 _complexstuff.h 打补丁
-          COMPLEXSTUFF_HEADER="$SCIPY_SRC/scipy/special/_complexstuff.h"
-          if [ -f "$COMPLEXSTUFF_HEADER" ]; then
-            if ! grep -q '#include <complex.h>' "$COMPLEXSTUFF_HEADER"; then
-              sed -i '1i #include <complex.h>' "$COMPLEXSTUFF_HEADER"
-              echo "✅ Patched $COMPLEXSTUFF_HEADER"
-            else
-              echo "ℹ️ _complexstuff.h already includes <complex.h>"
-            fi
-          else
-            echo "❌ Could not locate _complexstuff.h at $COMPLEXSTUFF_HEADER"
-            exit 1
-          fi
-
-          # 3. 修改 meta.yaml 指向本地源码
           rm -rf "$RECIPE_DIR"
           mkdir -p "$RECIPE_DIR"
 
@@ -387,7 +398,7 @@ jobs:
             name: scipy
             version: "${{ inputs.scipy_version }}"
           source:
-            path: $SCIPY_SRC
+            url: https://files.pythonhosted.org/packages/source/s/scipy/scipy-${{ inputs.scipy_version }}.tar.gz
           build:
             number: 0
             script_env:
@@ -404,7 +415,6 @@ jobs:
               - chaquopy-openblas 0.2.20
           EOF
 
-          # 4. 构建
           cd "$PYPI_DIR"
           if ! python build-wheel.py \
                 --python 3.12 \
