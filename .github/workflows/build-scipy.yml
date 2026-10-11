@@ -77,10 +77,56 @@ jobs:
           /opt/android-gfortran/bin/aarch64-linux-android-gfortran --version | head -1
 
       # ============================================================
-      # C 编译器 wrapper：给所有 .c 文件强制注入 -include complex.h
-      # 绕过 Meson 对 c_args 的过滤
+      # 生成 SciPy 复数函数兼容头
+      # bionic 的 clog/cpow/cexp 是 API 26 才有的，API 24 上必须
+      # 自己用 log/atan2/exp 实现 fallback。
       # ============================================================
-      - name: Create C compiler wrapper (inject complex.h)
+      - name: Create scipy complex compat header
+        run: |
+          set -euo pipefail
+          cat > /tmp/scipy-complex-compat.h <<'EOF'
+          #ifndef SCIPY_ANDROID_COMPLEX_COMPAT_H
+          #define SCIPY_ANDROID_COMPLEX_COMPAT_H
+
+          #include <complex.h>
+          #include <math.h>
+          #include <sys/cdefs.h>
+
+          #if defined(__ANDROID__) && defined(__ANDROID_API__) && (__ANDROID_API__ < 26)
+
+          /* clog(z) = log|z| + i * arg(z) */
+          static inline double complex __scipy_compat_clog(double complex z) {
+              double r = creal(z), i = cimag(z);
+              return log(sqrt(r*r + i*i)) + I * atan2(i, r);
+          }
+
+          /* cexp(z) = e^a * (cos(b) + i*sin(b)), z = a + bi */
+          static inline double complex __scipy_compat_cexp(double complex z) {
+              double a = creal(z), b = cimag(z);
+              return exp(a) * (cos(b) + I * sin(b));
+          }
+
+          /* cpow(x, y) = cexp(y * clog(x)) */
+          static inline double complex __scipy_compat_cpow(double complex x, double complex y) {
+              return __scipy_compat_cexp(y * __scipy_compat_clog(x));
+          }
+
+          #define clog __scipy_compat_clog
+          #define cexp __scipy_compat_cexp
+          #define cpow __scipy_compat_cpow
+
+          #endif /* __ANDROID_API__ < 26 */
+          #endif /* SCIPY_ANDROID_COMPLEX_COMPAT_H */
+          EOF
+
+          echo "=== compat header ==="
+          cat /tmp/scipy-complex-compat.h
+
+      # ============================================================
+      # C 编译器 wrapper：只对 .c 文件注入 compat header
+      # C++ 不动，避免污染 std::complex
+      # ============================================================
+      - name: Create C compiler wrapper (inject complex compat)
         run: |
           set -euo pipefail
           NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
@@ -89,10 +135,8 @@ jobs:
 
           cat > "$WRAP/aarch64-linux-android${ANDROID_API_LEVEL}-clang" <<EOF
           #!/bin/bash
-          # 真 clang
           REAL_CLANG="${NDK_BIN}/aarch64-linux-android${ANDROID_API_LEVEL}-clang"
 
-          # 检测参数里是否包含 .c 文件（纯 C 编译）
           is_c=false
           for arg in "\$@"; do
             case "\$arg" in
@@ -101,15 +145,13 @@ jobs:
           done
 
           if \$is_c; then
-            # 只给 C 编译注入 complex.h；C++ 不动
-            exec "\$REAL_CLANG" -include complex.h "\$@"
+            exec "\$REAL_CLANG" -include /tmp/scipy-complex-compat.h "\$@"
           else
             exec "\$REAL_CLANG" "\$@"
           fi
           EOF
           chmod +x "$WRAP/aarch64-linux-android${ANDROID_API_LEVEL}-clang"
 
-          # 打印一下验证
           "$WRAP/aarch64-linux-android${ANDROID_API_LEVEL}-clang" --version | head -1
 
       # ============================================================
@@ -163,7 +205,7 @@ jobs:
                 shift ;;
             esac
           done
-          exec "${NDK_BIN}/clang" --target=aarch64-linux-android24 "\${ARGS[@]}"
+          exec "${NDK_BIN}/clang" --target=aarch64-linux-android${ANDROID_API_LEVEL} "\${ARGS[@]}"
           EOF
           chmod +x "$WRAP/ld"
 
@@ -186,7 +228,7 @@ jobs:
           if grep -q '\.section.*\.gcc_except_table,"aw"' "\$input" 2>/dev/null; then
             sed -i -E 's/(\.section[[:space:]]+\.gcc_except_table),"aw"/\1,"a"/g' "\$input"
           fi
-          exec "${NDK_BIN}/clang" --target=aarch64-linux-android24 -c -o "\$out" "\$input"
+          exec "${NDK_BIN}/clang" --target=aarch64-linux-android${ANDROID_API_LEVEL} -c -o "\$out" "\$input"
           EOF
           chmod +x "$WRAP/as"
 
