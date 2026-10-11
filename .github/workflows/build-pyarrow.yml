@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       pyarrow_version:
-        description: 'pyarrow 版本（如 25.0.1）'
+        description: 'pyarrow 版本'
         required: true
         default: '25.0.1'
       python:
@@ -12,8 +12,7 @@ on:
         required: true
         default: '3.12'
         type: choice
-        options:
-          - '3.12'
+        options: ['3.12']
       python_target_version:
         description: 'Chaquopy Python target 版本'
         required: true
@@ -28,11 +27,9 @@ jobs:
     timeout-minutes: 350
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python (host)
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: |
             3.12
@@ -45,14 +42,12 @@ jobs:
 
       - name: Clone Chaquopy 17.0.0
         run: |
-          git clone --depth 1 --branch 17.0.0 --recurse-submodules \
-            https://github.com/chaquo/chaquopy.git /opt/chaquopy
+          git clone --depth 1 --branch 17.0.0 --recurse-submodules https://github.com/chaquo/chaquopy.git /opt/chaquopy
           cd /opt/chaquopy
           git submodule update --init --recursive || true
 
       - name: Install Chaquopy build requirements
-        run: |
-          pip install -r /opt/chaquopy/server/pypi/requirements.txt
+        run: pip install -r /opt/chaquopy/server/pypi/requirements.txt
 
       - name: Set Android env vars
         run: |
@@ -62,96 +57,86 @@ jobs:
 
       - name: Pre-install NDK r27c
         continue-on-error: true
-        run: |
-          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;27.3.13750724" || true
+        run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;27.3.13750724" || true
 
       - name: Patch Chaquopy build-wheel.py
         run: |
-          python3 - <<'PY'
+          cat > /tmp/patch_bw.py <<'PATCH_EOF'
           p = "/opt/chaquopy/server/pypi/build-wheel.py"
           src = open(p).read()
 
           old1 = 'python_executable=f"{self.build_env}/bin/python")'
           new1 = 'python_executable=f"{self.build_env}/bin/python{self.python}")'
-          if old1 not in src:
-              raise SystemExit("patch1 not found")
+          if old1 not in src: raise SystemExit("patch1 not found")
           src = src.replace(old1, new1, 1)
 
-          old2 = ('            "PYO3_CROSS_PYTHON_VERSION": self.python,\n'
-                  '        })')
-          new2 = ('            "PYO3_CROSS_PYTHON_VERSION": self.python,\n'
-                  '            "PYO3_CROSS_LIB_DIR": f"{self.host_env}/chaquopy/lib",\n'
-                  '        })')
-          if old2 not in src:
-              raise SystemExit("patch2 not found")
+          old2 = '            "PYO3_CROSS_PYTHON_VERSION": self.python,\n        })'
+          new2 = '            "PYO3_CROSS_PYTHON_VERSION": self.python,\n            "PYO3_CROSS_LIB_DIR": f"{self.host_env}/chaquopy/lib",\n        })'
+          if old2 not in src: raise SystemExit("patch2 not found")
           src = src.replace(old2, new2, 1)
 
-          # pyarrow 25.x 使用 scikit-build-core，走 cmake.define.* 传参
           old3 = '            return self.builder.build("wheel", "dist")'
-          new3 = ('            py_include = f"{self.host_env}/chaquopy/include/python{self.python}"\n'
-                  '            py_lib = f"{self.host_env}/chaquopy/lib/libpython{self.python}.so"\n'
-                  '            host_python = "/opt/hostedtoolcache/Python/3.12.15/x64/bin/python3.12"\n'
-                  '            import os\n'
-                  '            if not os.path.exists(host_python):\n'
-                  '                import sys\n'
-                  '                host_python = sys.executable\n'
-                  '            return self.builder.build(\n'
-                  '                "wheel", "dist",\n'
-                  '                config_settings={\n'
-                  '                    "cmake.define.ARROW_BUILD_TESTS": "OFF",\n'
-                  '                    "cmake.define.ARROW_BUILD_BENCHMARKS": "OFF",\n'
-                  '                    "cmake.define.ARROW_BUILD_EXAMPLES": "OFF",\n'
-                  '                    "cmake.define.ARROW_BUILD_STATIC": "ON",\n'
-                  '                    "cmake.define.ARROW_BUILD_SHARED": "ON",\n'
-                  '                    "cmake.define.ARROW_DEPENDENCY_SOURCE": "BUNDLED",\n'
-                  '                    "cmake.define.ARROW_JEMALLOC": "OFF",\n'
-                  '                    "cmake.define.ARROW_SIMD_LEVEL": "NONE",\n'
-                  '                    "cmake.define.ARROW_RUNTIME_SIMD_LEVEL": "NONE",\n'
-                  '                    "cmake.define.ARROW_CPU_FLAG": "ARMV8",\n'
-                  '                    "cmake.define.ARROW_COMPUTE": "ON",\n'
-                  '                    "cmake.define.ARROW_CSV": "OFF",\n'
-                  '                    "cmake.define.ARROW_JSON": "OFF",\n'
-                  '                    "cmake.define.ARROW_PARQUET": "ON",\n'
-                  '                    "cmake.define.ARROW_DATASET": "OFF",\n'
-                  '                    "cmake.define.ARROW_WITH_BROTLI": "OFF",\n'
-                  '                    "cmake.define.ARROW_WITH_BZ2": "OFF",\n'
-                  '                    "cmake.define.ARROW_WITH_LZ4": "OFF",\n'
-                  '                    "cmake.define.ARROW_WITH_SNAPPY": "OFF",\n'
-                  '                    "cmake.define.ARROW_WITH_ZLIB": "ON",\n'
-                  '                    "cmake.define.ARROW_WITH_ZSTD": "OFF",\n'
-                  '                    "cmake.define.ARROW_WITH_UTF8PROC": "OFF",\n'
-                  '                    "cmake.define.ARROW_WITH_RE2": "OFF",\n'
-                  '                    "cmake.define.ARROW_WITH_GRPC": "OFF",\n'
-                  '                    "cmake.define.ARROW_WITH_THRIFT": "OFF",\n'
-                  '                    "cmake.define.ARROW_WITH_PROTOBUF": "ON",\n'
-                  '                    "cmake.define.ARROW_WITH_BOOST": "OFF",\n'
-                  '                    "cmake.define.ARROW_S3": "OFF",\n'
-                  '                    "cmake.define.ARROW_GCS": "OFF",\n'
-                  '                    "cmake.define.ARROW_HDFS": "OFF",\n'
-                  '                    "cmake.define.ARROW_FLIGHT": "OFF",\n'
-                  '                    "cmake.define.ARROW_GANDIVA": "OFF",\n'
-                  '                    "cmake.define.ARROW_ACERO": "OFF",\n'
-                  '                    "cmake.define.ARROW_PYTHON": "ON",\n'
-                  '                    "cmake.define.Python_EXECUTABLE": host_python,\n'
-                  '                    "cmake.define.Python_INCLUDE_DIR": py_include,\n'
-                  '                    "cmake.define.Python_LIBRARY": py_lib,\n'
-                  '                }\n'
-                  '            )')
-          if old3 not in src:
-              raise SystemExit("patch3 not found")
+          new3 = '''            py_include = f"{self.host_env}/chaquopy/include/python{self.python}"
+                      py_lib = f"{self.host_env}/chaquopy/lib/libpython{self.python}.so"
+                      numpy_include = "/tmp/numpy-include/numpy/_core/include"
+                      import os, sys
+                      host_python = sys.executable
+                      hp = f"/opt/hostedtoolcache/Python/3.12.15/x64/bin/python3.12"
+                      if os.path.exists(hp): host_python = hp
+                      return self.builder.build("wheel", "dist", config_settings={
+                          "cmake.define.ARROW_BUILD_TESTS": "OFF",
+                          "cmake.define.ARROW_BUILD_BENCHMARKS": "OFF",
+                          "cmake.define.ARROW_BUILD_EXAMPLES": "OFF",
+                          "cmake.define.ARROW_BUILD_STATIC": "ON",
+                          "cmake.define.ARROW_BUILD_SHARED": "ON",
+                          "cmake.define.ARROW_DEPENDENCY_SOURCE": "BUNDLED",
+                          "cmake.define.ARROW_JEMALLOC": "OFF",
+                          "cmake.define.ARROW_SIMD_LEVEL": "NONE",
+                          "cmake.define.ARROW_RUNTIME_SIMD_LEVEL": "NONE",
+                          "cmake.define.ARROW_CPU_FLAG": "ARMV8",
+                          "cmake.define.ARROW_COMPUTE": "ON",
+                          "cmake.define.ARROW_CSV": "OFF",
+                          "cmake.define.ARROW_JSON": "OFF",
+                          "cmake.define.ARROW_PARQUET": "ON",
+                          "cmake.define.ARROW_DATASET": "OFF",
+                          "cmake.define.ARROW_WITH_BROTLI": "OFF",
+                          "cmake.define.ARROW_WITH_BZ2": "OFF",
+                          "cmake.define.ARROW_WITH_LZ4": "OFF",
+                          "cmake.define.ARROW_WITH_SNAPPY": "OFF",
+                          "cmake.define.ARROW_WITH_ZLIB": "ON",
+                          "cmake.define.ARROW_WITH_ZSTD": "OFF",
+                          "cmake.define.ARROW_WITH_UTF8PROC": "OFF",
+                          "cmake.define.ARROW_WITH_RE2": "OFF",
+                          "cmake.define.ARROW_WITH_GRPC": "OFF",
+                          "cmake.define.ARROW_WITH_THRIFT": "OFF",
+                          "cmake.define.ARROW_WITH_PROTOBUF": "ON",
+                          "cmake.define.ARROW_WITH_BOOST": "OFF",
+                          "cmake.define.ARROW_S3": "OFF",
+                          "cmake.define.ARROW_GCS": "OFF",
+                          "cmake.define.ARROW_HDFS": "OFF",
+                          "cmake.define.ARROW_FLIGHT": "OFF",
+                          "cmake.define.ARROW_GANDIVA": "OFF",
+                          "cmake.define.ARROW_ACERO": "OFF",
+                          "cmake.define.ARROW_PYTHON": "ON",
+                          "cmake.define.Python_EXECUTABLE": host_python,
+                          "cmake.define.Python_INCLUDE_DIR": py_include,
+                          "cmake.define.Python_LIBRARY": py_lib,
+                          "cmake.define.Python3_NumPy_INCLUDE_DIR": numpy_include,
+                          "cmake.define.NUMPY_LIB": "/tmp/numpy-include",
+                      })'''
+          if old3 not in src: raise SystemExit("patch3 not found")
           src = src.replace(old3, new3, 1)
 
           open(p, "w").write(src)
           print("=== 3 patches ok ===")
-          PY
-          grep -n "python_executable=" /opt/chaquopy/server/pypi/build-wheel.py
-          grep -n "cmake.define.ARROW_DEPENDENCY_SOURCE" /opt/chaquopy/server/pypi/build-wheel.py
+          PATCH_EOF
+          python3 /tmp/patch_bw.py
+          wc -l /tmp/patch_bw.py
 
       - name: Download Android Python target
         run: |
           cd /opt/chaquopy
-          ./target/download-target.sh \
-            maven/com/chaquo/python/target/${{ inputs.python_target_version }}
+          ./target/download-target.sh maven/com/chaquo/python/target/${{ inputs.python_target_version }}
           find /opt/chaquopy/maven -name "*.zip" -exec ls -la {} \;
 
       - name: Inject sysconfigdata
@@ -188,93 +173,67 @@ jobs:
       - name: Download dependencies
         run: |
           DIST_DIR="/opt/chaquopy/server/pypi/dist"
-
-          mkdir -p "$DIST_DIR/numpy"
-          wget -q "https://github.com/Ruixu-Account/chaquopy-android-wheels/releases/download/latest/numpy-2.5.3-0-cp312-cp312-android_24_arm64_v8a.whl" \
-            -O "$DIST_DIR/numpy/numpy-2.5.3-0-cp312-cp312-android_24_arm64_v8a.whl"
-
-          mkdir -p "$DIST_DIR/chaquopy-libcxx"
-          wget -q "https://chaquo.com/pypi-13.1/chaquopy-libcxx/chaquopy_libcxx-180000-0-py3-none-android_24_arm64_v8a.whl" \
-            -O "$DIST_DIR/chaquopy-libcxx/chaquopy_libcxx-180000-0-py3-none-android_24_arm64_v8a.whl"
-
-          echo "=== dist 目录 ==="
+          mkdir -p "$DIST_DIR/numpy" "$DIST_DIR/chaquopy-libcxx"
+          
+          # 从用户提供的 URL 拉取 NumPy wheel
+          NUMPY_URL="https://github.com/Ruixu-Account/chaquopy-android-wheels/releases/download/latest/numpy-2.5.3-0-cp312-cp312-android_24_arm64_v8a.whl"
+          wget -q "$NUMPY_URL" -O "$DIST_DIR/numpy/numpy-2.5.3-0-cp312-cp312-android_24_arm64_v8a.whl"
+          
+          # 解压 NumPy 到 /tmp/numpy-include，供 CMake 查找
+          rm -rf /tmp/numpy-include
+          mkdir -p /tmp/numpy-include
+          unzip -q "$DIST_DIR/numpy/numpy-2.5.3-0-cp312-cp312-android_24_arm64_v8a.whl" -d /tmp/numpy-include
+          
+          # 验证 NumPy include 目录存在
+          ls -la /tmp/numpy-include/numpy/_core/include/ || { echo "NumPy include dir missing"; exit 1; }
+          
+          wget -q "https://chaquo.com/pypi-13.1/chaquopy-libcxx/chaquopy_libcxx-180000-0-py3-none-android_24_arm64_v8a.whl" -O "$DIST_DIR/chaquopy-libcxx/chaquopy_libcxx-180000-0-py3-none-android_24_arm64_v8a.whl"
           find "$DIST_DIR" -name "*.whl" -exec ls -la {} \;
 
       - name: Clone and patch pyarrow source
         run: |
+          set -euo pipefail
           cd /tmp
           rm -rf arrow-src
-          git clone --depth 1 --branch apache-arrow-${{ inputs.pyarrow_version }} \
-            https://github.com/apache/arrow.git arrow-src
+          git clone --depth 1 --branch apache-arrow-${{ inputs.pyarrow_version }} https://github.com/apache/arrow.git arrow-src
           cd arrow-src
+          [ -f python/CMakeLists.txt ] || { echo "FATAL: CMakeLists.txt missing"; exit 1; }
+          [ -f python/pyproject.toml ] || { echo "FATAL: pyproject.toml missing"; exit 1; }
 
-          echo "=== pyarrow 版本 ==="
-          grep -n "version" python/pyproject.toml | head -5 || true
+          echo "=== BEFORE: Python3Alt 相关 ==="
+          grep -n "Python3Alt\|NumPy_INCLUDE\|NUMPY_LIB" python/CMakeLists.txt || echo "(none)"
 
-          echo "=== BEFORE: find_package(Python) 在 python/CMakeLists.txt ==="
-          grep -n "find_package(Python\|find_package(NumPy\|Python3_NumPy\|NumPy_INCLUDE" python/CMakeLists.txt || echo "(not found)"
-
-          python3 - <<'PY'
+          cat > /tmp/patch_arrow.py <<'PATCH_EOF'
           import re
-
           path = "python/CMakeLists.txt"
-          with open(path) as f:
-              content = f.read()
+          content = open(path).read()
 
-          patterns = [
-              re.compile(r'find_package\s*\(\s*Python3?\b[^)]*\)', re.MULTILINE | re.DOTALL),
-              re.compile(r'find_package\s*\(\s*NumPy\b[^)]*\)', re.MULTILINE | re.DOTALL),
-          ]
+          # 替换 find_package(Python3Alt REQUIRED) 为手工设置路径
+          old_alt = 'find_package(Python3Alt REQUIRED)'
+          new_alt = '''# === Chaquopy patch: 手工设置 Python/NumPy 路径 ===
+          set(Python3_NumPy_INCLUDE_DIR "/tmp/numpy-include/numpy/_core/include")
+          message(STATUS "Chaquopy: Python3_NumPy_INCLUDE_DIR = ${Python3_NumPy_INCLUDE_DIR}")
+          if(NOT EXISTS "${Python3_NumPy_INCLUDE_DIR}")
+            message(FATAL_ERROR "Chaquopy: numpy include dir not exist: ${Python3_NumPy_INCLUDE_DIR}")
+          endif()'''
+          if old_alt not in content:
+              raise SystemExit("FATAL: find_package(Python3Alt REQUIRED) not found")
+          content = content.replace(old_alt, new_alt, 1)
 
-          all_matches = []
-          for p in patterns:
-              all_matches.extend(p.findall(content))
-
-          print(f"FOUND {len(all_matches)} find_package statements")
-          for m in all_matches:
-              print(f"  {m!r}")
-
-          if not all_matches:
-              raise SystemExit("FATAL: no find_package(Python/NumPy) found in python/CMakeLists.txt")
-
-          replacement = (
-              '# === Chaquopy patch: 手工设置 Python/NumPy 路径，绕过 FindPython ===\n'
-              'get_filename_component(_py_inc_parent "${Python_INCLUDE_DIRS}" DIRECTORY)\n'
-              'get_filename_component(_py_chaquopy "${_py_inc_parent}" DIRECTORY)\n'
-              'get_filename_component(_host_env "${_py_chaquopy}" DIRECTORY)\n'
-              'set(Python_NumPy_INCLUDE_DIRS "${_host_env}/numpy/_core/include")\n'
-              'message(STATUS "Chaquopy: Python_INCLUDE_DIRS = ${Python_INCLUDE_DIRS}")\n'
-              'message(STATUS "Chaquopy: Python_NumPy_INCLUDE_DIRS = ${Python_NumPy_INCLUDE_DIRS}")\n'
-              'if(NOT EXISTS "${Python_NumPy_INCLUDE_DIRS}")\n'
-              '  message(FATAL_ERROR "Chaquopy: numpy include dir does not exist: ${Python_NumPy_INCLUDE_DIRS}")\n'
-              'endif()\n'
-              'if(NOT TARGET Python::NumPy)\n'
-              '  add_library(Python::NumPy INTERFACE IMPORTED)\n'
-              '  set_target_properties(Python::NumPy PROPERTIES\n'
-              '    INTERFACE_INCLUDE_DIRECTORIES "${Python_NumPy_INCLUDE_DIRS}")\n'
-              '  message(STATUS "Chaquopy: created fake Python::NumPy target")\n'
-              'endif()\n'
-              '# === /Chaquopy patch ===\n'
-          )
-
-          for p in patterns:
-              content = p.sub(replacement, content, count=1)
-
-          with open(path, "w") as f:
-              f.write(content)
-          print("OK: patched python/CMakeLists.txt")
-          PY
+          open(path, "w").write(content)
+          print("OK: patched find_package(Python3Alt)")
+          PATCH_EOF
+          python3 /tmp/patch_arrow.py
 
           echo "=== AFTER: python/CMakeLists.txt ==="
-          grep -n "Chaquopy patch\|Python_NumPy_INCLUDE_DIRS\|Python::NumPy" python/CMakeLists.txt || echo "(not found)"
+          grep -n "Chaquopy\|Python3_NumPy" python/CMakeLists.txt | head -10 || echo "(none)"
 
       - name: Prepare pyarrow recipe
         run: |
           RECIPE="/opt/chaquopy/server/pypi/packages/astrbot-pyarrow"
           rm -rf "$RECIPE"
           mkdir -p "$RECIPE"
-
-          cat > "$RECIPE/meta.yaml" <<'EOF'
+          cat > "$RECIPE/meta.yaml" <<EOF
           package:
             name: pyarrow
             version: "${{ inputs.pyarrow_version }}"
@@ -294,43 +253,30 @@ jobs:
               - numpy 2.5.3
               - chaquopy-libcxx 180000
           EOF
-
-          echo "=== meta.yaml ==="
           cat "$RECIPE/meta.yaml"
 
       - name: Build pyarrow
         run: |
           cd /opt/chaquopy/server/pypi
-          python build-wheel.py \
-            --python ${{ inputs.python }} \
-            --abi arm64-v8a \
-            /opt/chaquopy/server/pypi/packages/astrbot-pyarrow 2>&1 | tee /tmp/build-pyarrow.log
+          python build-wheel.py --python ${{ inputs.python }} --abi arm64-v8a /opt/chaquopy/server/pypi/packages/astrbot-pyarrow 2>&1 | tee /tmp/build-pyarrow.log
           echo "=== last 120 lines ==="
           tail -120 /tmp/build-pyarrow.log
 
-      # ============================================================
-      # 新增：依赖检查
-      # 拆开 wheel，把所有 .so 的 NEEDED / SONAME 列出来，
-      # 并汇总去重，最后检查有没有可疑的 glibc / x86 依赖。
-      # ============================================================
       - name: Check shared library dependencies
         if: success()
         run: |
           set -euo pipefail
           DIST_DIR="/opt/chaquopy/server/pypi/dist/pyarrow"
           WHEEL=$(find "$DIST_DIR" -name "*android_*.whl" | head -1)
-          if [ -z "$WHEEL" ]; then
-            echo "❌ No android wheel found in $DIST_DIR"
-            exit 1
-          fi
-          echo "=== Analyzing wheel: $WHEEL ==="
+          [ -n "$WHEEL" ] || { echo "No wheel found"; exit 1; }
+          echo "=== Analyzing: $WHEEL ==="
           CHECK_DIR=/tmp/pyarrow-check
           rm -rf "$CHECK_DIR"
           mkdir -p "$CHECK_DIR"
           unzip -q "$WHEEL" -d "$CHECK_DIR"
 
           echo ""
-          echo "=== [1] All .so files in wheel ==="
+          echo "=== [1] All .so files ==="
           find "$CHECK_DIR" -name "*.so" -type f | sort | sed "s|$CHECK_DIR/||"
 
           echo ""
@@ -338,63 +284,37 @@ jobs:
           find "$CHECK_DIR" -name "*.so" -type f -exec sh -c '
             for so; do
               echo "--- ${so#'"$CHECK_DIR"'/} ---"
-              readelf -d "$so" 2>/dev/null | grep -E "NEEDED|SONAME" || echo "  (no dynamic section)"
+              readelf -d "$so" 2>/dev/null | grep -E "NEEDED|SONAME" || echo "  (none)"
             done
           ' _ {} \;
 
           echo ""
-          echo "=== [3] Aggregated NEEDED (unique, sorted) ==="
+          echo "=== [3] Aggregated NEEDED ==="
           find "$CHECK_DIR" -name "*.so" -type f -exec sh -c '
             readelf -d "$1" 2>/dev/null | grep "NEEDED" || true
           ' _ {} \; | sed -E 's/.*\[(.*)\]/\1/' | sort -u
 
           echo ""
-          echo "=== [4] Aggregated SONAME (unique, sorted) ==="
-          find "$CHECK_DIR" -name "*.so" -type f -exec sh -c '
-            readelf -d "$1" 2>/dev/null | grep "SONAME" || true
-          ' _ {} \; | sed -E 's/.*\[(.*)\]/\1/' | sort -u
-
-          echo ""
-          echo "=== [5] Suspicious glibc / gfortran / libstdc++ refs ==="
-          SUSPICIOUS=0
+          echo "=== [4] Suspicious refs ==="
           for pat in 'libgfortran\.so\.3' 'libpthread\.so\.0' 'libdl\.so\.1' 'libstdc\+\+\.so\.6' 'libgcc_s\.so\.1'; do
-            HITS=$(find "$CHECK_DIR" -name "*.so" -type f -exec sh -c "
-              readelf -d \"\$1\" 2>/dev/null | grep -E '$pat' || true
-            " _ {} \; | sort -u)
-            if [ -n "$HITS" ]; then
-              echo "⚠️  Pattern '$pat' found:"
-              echo "$HITS" | sed 's/^/    /'
-              SUSPICIOUS=$((SUSPICIOUS + 1))
-            fi
+            HITS=$(find "$CHECK_DIR" -name "*.so" -type f -exec sh -c "readelf -d \"\$1\" 2>/dev/null | grep -E '$pat' || true" _ {} \; | sort -u)
+            [ -n "$HITS" ] && { echo "WARNING: '$pat' found:"; echo "$HITS" | sed 's/^/    /'; }
           done
-          if [ "$SUSPICIOUS" -eq 0 ]; then
-            echo "✅ No suspicious glibc/gfortran/libstdc++ refs found"
-          fi
+          echo "=== Suspicious check done ==="
 
           echo ""
-          echo "=== [6] File architecture check (should be aarch64) ==="
-          find "$CHECK_DIR" -name "*.so" -type f -exec file {} \; | sed "s|$CHECK_DIR/||" | head -40
-
-          echo ""
-          echo "=== [7] pyarrow version metadata ==="
-          find "$CHECK_DIR" -name "*.dist-info" -type d -exec sh -c '
-            for d; do
-              echo "--- ${d#'"$CHECK_DIR"'/} ---"
-              cat "$d/METADATA" 2>/dev/null | grep -E "^(Name|Version):" || true
-            done
-          ' _ {} \;
+          echo "=== [5] Architecture check ==="
+          find "$CHECK_DIR" -name "*.so" -type f -exec file {} \; | sed "s|$CHECK_DIR/||" | head -30
 
       - name: List built wheels
         if: always()
-        run: |
-          find /opt/chaquopy/server/pypi/dist/pyarrow -name "*.whl" -exec ls -la {} \; || true
+        run: find /opt/chaquopy/server/pypi/dist/pyarrow -name "*.whl" -exec ls -la {} \; || true
 
       - name: Collect android wheel
         if: success()
         run: |
           mkdir -p /tmp/all-wheels
-          find /opt/chaquopy/server/pypi/dist/pyarrow -name "*android_*.whl" \
-            -exec cp -f {} /tmp/all-wheels/ \;
+          find /opt/chaquopy/server/pypi/dist/pyarrow -name "*android_*.whl" -exec cp -f {} /tmp/all-wheels/ \;
           ls -la /tmp/all-wheels/
 
       - name: Upload artifact
