@@ -1,0 +1,86 @@
+name: Build pyarrow for Android
+
+on:
+  workflow_dispatch:
+    inputs:
+      pyarrow_version:
+        description: 'pyarrow 版本（如 25.0.1）'
+        required: true
+        default: '25.0.1'
+      python:
+        description: 'Python 版本'
+        required: true
+        default: '3.12'
+        type: choice
+        options:
+          - '3.12'
+      python_target_version:
+        description: 'Chaquopy Python target 版本'
+        required: true
+        default: '3.12.12-0'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python (host)
+        uses: actions/setup-python@v5
+        with:
+          python-version: |
+            3.12
+            3.11
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget unzip patchelf jq zip ninja-build swig cmake binutils file
+
+      - name: Clone Chaquopy 17.0.0
+        run: |
+          git clone --depth 1 --branch 17.0.0 --recurse-submodules \
+            https://github.com/chaquo/chaquopy.git /opt/chaquopy
+          cd /opt/chaquopy
+          git submodule update --init --recursive || true
+
+      - name: Install Chaquopy build requirements
+        run: |
+          pip install -r /opt/chaquopy/server/pypi/requirements.txt
+
+      - name: Set Android env vars
+        run: |
+          echo "ANDROID_HOME=/usr/local/lib/android/sdk" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=/usr/local/lib/android/sdk" >> $GITHUB_ENV
+          echo "ANDROID_NDK_HOME=/usr/local/lib/android/sdk/ndk/27.3.13750724" >> $GITHUB_ENV
+
+      - name: Pre-install NDK r27c
+        continue-on-error: true
+        run: |
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;27.3.13750724" || true
+
+      - name: Patch Chaquopy build-wheel.py
+        run: |
+          python3 - <<'PY'
+          p = "/opt/chaquopy/server/pypi/build-wheel.py"
+          src = open(p).read()
+
+          old1 = 'python_executable=f"{self.build_env}/bin/python")'
+          new1 = 'python_executable=f"{self.build_env}/bin/python{self.python}")'
+          if old1 not in src:
+              raise SystemExit("patch1 not found")
+          src = src.replace(old1, new1, 1)
+
+          old2 = ('            "PYO3_CROSS_PYTHON_VERSION": self.python,\n'
+                  '        })')
+          new2 = ('            "PYO3_CROSS_PYTHON_VERSION": self.python,\n'
+                  '            "PYO3_CROSS_LIB_DIR": f"{self.host_env}/chaquopy/lib",\n'
+                  '        })')
+          if old2 not in src:
+              raise System
