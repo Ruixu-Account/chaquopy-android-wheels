@@ -39,8 +39,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y wget unzip patchelf jq zip ninja-build swig cmake binutils file
-          which patchelf
-          patchelf --version
+          which patchelf && patchelf --version
 
       - name: Clone Chaquopy 17.0.0
         run: |
@@ -50,6 +49,30 @@ jobs:
 
       - name: Install Chaquopy build requirements
         run: pip install -r /opt/chaquopy/server/pypi/requirements.txt
+
+      # ============================================================
+      # V26 新增：dump check_requirements 和 fix_wheel 的真实源码
+      # ============================================================
+      - name: Inspect check_requirements source
+        run: |
+          set -euo pipefail
+          F=/opt/chaquopy/server/pypi/build-wheel.py
+          echo "=== total lines: $(wc -l < "$F") ==="
+          echo ""
+          echo "=== def check_requirements line ==="
+          grep -n "def check_requirements" "$F" || echo "(not found)"
+          echo ""
+          echo "=== def fix_wheel line ==="
+          grep -n "def fix_wheel" "$F" || echo "(not found)"
+          echo ""
+          echo "=== dump lines 980-1100 (check_requirements body) ==="
+          sed -n '980,1100p' "$F" | nl -ba -v 980
+          echo ""
+          echo "=== grep all 'unknown library' ==="
+          grep -n "unknown library" "$F" || echo "(not found)"
+          echo ""
+          echo "=== grep all 'available_libs' ==="
+          grep -n "available_libs" "$F" || echo "(not found)"
 
       - name: Set Android env vars
         run: |
@@ -68,34 +91,16 @@ jobs:
           "$HOST_PY" -m pip install --quiet "cython>=3.1" "setuptools_scm[toml]>=8"
           "$HOST_PY" -c "import Cython; print('Cython version:', Cython.__version__)"
 
-      - name: Inspect build-wheel.py structure
-        run: |
-          set -euo pipefail
-          F=/opt/chaquopy/server/pypi/build-wheel.py
-          echo "=== 查找 unknown library 出现的所有行 ==="
-          grep -n "unknown library" "$F" || echo "(not found)"
-          echo ""
-          echo "=== 上下文 (前后各 15 行) ==="
-          LINE=$(grep -n "unknown library" "$F" | head -1 | cut -d: -f1 || true)
-          if [ -n "$LINE" ]; then
-            START=$((LINE - 15))
-            END=$((LINE + 15))
-            [ "$START" -lt 1 ] && START=1
-            sed -n "${START},${END}p" "$F" | nl -ba -v "$START"
-          fi
-          echo ""
-          echo "=== 查找 Processing native binaries ==="
-          grep -n "Processing native binaries" "$F" || echo "(not found)"
-
+      # ============================================================
+      # V26: patch 回到 V24 版本，不再注入 patchelf 逻辑
+      # （V25 的注入破坏了 check_requirements 的 Python 作用域）
+      # ============================================================
       - name: Patch Chaquopy build-wheel.py
         run: |
           cat > /tmp/patch_bw.py <<'PATCH_EOF'
-          import re
-
           p = "/opt/chaquopy/server/pypi/build-wheel.py"
           src = open(p).read()
 
-          # === patch 1/2/3：config_settings 相关 ===
           old1 = 'python_executable=f"{self.build_env}/bin/python")'
           new1 = 'python_executable=f"{self.build_env}/bin/python{self.python}")'
           if old1 not in src: raise SystemExit("patch1 not found")
@@ -143,42 +148,36 @@ jobs:
                       assert os.path.isdir(arrow_include), f"missing {arrow_include}"
                       print(f"Chaquopy: arrow_dir = {arrow_dir}")
 
-                      # === 用 patchelf 规范化：把所有 .so 的绝对路径 NEEDED 改成 basename ===
+                      # === 遍历 arrow-install/lib 里的所有 .so ===
+                      # 1) 先用 patchelf 把绝对路径的 NEEDED 修成 basename
+                      # 2) 再复制到 requirements/chaquopy/lib/
                       def get_needed(so_path):
                           try:
-                              out = subprocess.check_output(
-                                  ["readelf", "-d", so_path],
-                                  stderr=subprocess.DEVNULL,
-                              ).decode("utf-8", "replace")
+                              out = subprocess.check_output(["readelf", "-d", so_path], stderr=subprocess.DEVNULL).decode("utf-8", "replace")
                           except Exception:
                               return []
                           res = []
                           for line in out.splitlines():
                               if "NEEDED" in line and "[" in line and "]" in line:
-                                  lib = line.split("[", 1)[1].split("]", 1)[0]
-                                  res.append(lib)
+                                  res.append(line.split("[", 1)[1].split("]", 1)[0])
                           return res
 
                       def patchelf_normalize(so_path):
                           if os.path.islink(so_path):
                               return 0
                           fixed = 0
-                          for lib in get_needed(so_path):
-                              if "/" not in lib:
+                          for needed in get_needed(so_path):
+                              if "/" not in needed:
                                   continue
-                              base = os.path.basename(lib)
+                              base = os.path.basename(needed)
                               try:
-                                  subprocess.check_call(
-                                      ["patchelf", "--replace-needed", lib, base, so_path],
-                                      stderr=subprocess.STDOUT,
-                                  )
-                                  print(f"Chaquopy: patchelf {os.path.basename(so_path)}: {lib} -> {base}")
+                                  subprocess.check_call(["patchelf", "--replace-needed", needed, base, so_path], stderr=subprocess.STDOUT)
+                                  print(f"Chaquopy: patchelf {os.path.basename(so_path)}: {needed} -> {base}")
                                   fixed += 1
                               except Exception as e:
-                                  print(f"Chaquopy WARN: patchelf failed on {so_path} ({lib}): {e}")
+                                  print(f"Chaquopy WARN: patchelf failed on {so_path} ({needed}): {e}")
                           return fixed
 
-                      # 1) 先把 arrow-install/lib 里所有 .so 规范化
                       arrow_lib_dir = f"{arrow_prefix}/lib"
                       if os.path.isdir(arrow_lib_dir):
                           for name in sorted(os.listdir(arrow_lib_dir)):
@@ -188,8 +187,6 @@ jobs:
                                   continue
                               patchelf_normalize(os.path.join(arrow_lib_dir, name))
 
-                      # 2) 把 arrow-install/lib 里所有 .so（排除 libc++）复制到
-                      # requirements/chaquopy/lib/
                       target_lib_dir = py_lib_dir
                       os.makedirs(target_lib_dir, exist_ok=True)
                       staged = []
@@ -213,15 +210,11 @@ jobs:
                                   print(f"Chaquopy WARN: copy {name}: {e}")
                       print(f"Chaquopy: staged {len(staged)} libs")
 
-                      # 3) 对 requirements/chaquopy/lib 里所有 .so 再 normalize 一次
-                      # （包括 chaquopy 自带的 libpython3.12.so，改的是它的被引用形式，
-                      #  实际改的是依赖它的其它 .so）
                       for name in sorted(os.listdir(target_lib_dir)):
                           if not (name.endswith(".so") or ".so." in name):
                               continue
                           patchelf_normalize(os.path.join(target_lib_dir, name))
 
-                      # 4) 打印最终 lib 目录内容
                       print(f"Chaquopy: target_lib_dir contents:")
                       for n in sorted(os.listdir(target_lib_dir)):
                           print(f"  {n}")
@@ -266,62 +259,17 @@ jobs:
                           "cmake.define.ARROW_PYTHON": "ON",
                           "cmake.define.Python_EXECUTABLE": host_python,
                           "cmake.define.Python_INCLUDE_DIR": py_include,
-                          "cmake.define.Python_LIBRARY": py_soname if False else py_lib,
+                          "cmake.define.Python_LIBRARY": py_lib,
                           "cmake.define.Python3_NumPy_INCLUDE_DIR": numpy_include,
                           "cmake.define.NUMPY_LIB": "/opt/chaquopy/server/pypi/numpy-include",
                       })'''
           if old3 not in src: raise SystemExit("patch3 not found")
           src = src.replace(old3, new3, 1)
 
-          # === V25 新增 patch：改写 "unknown library" 检查，先 patchelf 再检查 ===
-          MARKER = "is linked against unknown library"
-          if MARKER not in src:
-              print(f"WARN: marker '{MARKER}' not found in build-wheel.py")
-          elif "PATCHED_BY_V25" in src:
-              print("Already patched with PATCHED_BY_V25")
-          else:
-              lines = src.split("\n")
-              done = False
-              for i, line in enumerate(lines):
-                  if MARKER not in line:
-                      continue
-                  # 往前找最近的 if 或 elif
-                  if_idx = None
-                  for j in range(i, max(0, i - 15), -1):
-                      s = lines[j].lstrip()
-                      if s.startswith("if ") or s.startswith("elif "):
-                          if_idx = j
-                          break
-                  if if_idx is None:
-                      print(f"WARN: no if found near line {i+1}")
-                      for k in range(max(0, i-5), min(len(lines), i+5)):
-                          print(f"  [{k+1}] {lines[k]}")
-                      break
-                  if_line = lines[if_idx]
-                  indent = len(if_line) - len(if_line.lstrip())
-                  indent_str = " " * indent
-                  new_lines = lines[:if_idx]
-                  new_lines.append(f"{indent_str}# PATCHED_BY_V25: auto-fix absolute NEEDED with patchelf")
-                  new_lines.append(f"{indent_str}if \"/\" in lib:")
-                  new_lines.append(f"{indent_str}    import subprocess as _sp, os as _os")
-                  new_lines.append(f"{indent_str}    _base = _os.path.basename(lib)")
-                  new_lines.append(f"{indent_str}    try:")
-                  new_lines.append(f"{indent_str}        _sp.check_call([\"patchelf\", \"--replace-needed\", lib, _base, path])")
-                  new_lines.append(f"{indent_str}        print(f\"Chaquopy patchelf: {{lib}} -> {{_base}} in {{path}}\")")
-                  new_lines.append(f"{indent_str}        lib = _base")
-                  new_lines.append(f"{indent_str}    except Exception as _e:")
-                  new_lines.append(f"{indent_str}        print(f\"Chaquopy WARN: patchelf failed: {{_e}}\")")
-                  new_lines.extend(lines[if_idx:])
-                  src = "\n".join(new_lines)
-                  print(f"OK: PATCHED_BY_V25 applied before if at line {if_idx+1}")
-                  print(f"  original if: {if_line!r}")
-                  done = True
-                  break
-              if not done:
-                  print("WARN: PATCHED_BY_V25 not applied")
+          # V26: 不做 PATCHED_BY_V25 那种注入（它破坏了函数作用域）
 
           open(p, "w").write(src)
-          print("=== patches applied ===")
+          print("=== 3 patches ok ===")
           PATCH_EOF
           python3 /tmp/patch_bw.py
           wc -l /tmp/patch_bw.py
@@ -358,13 +306,6 @@ jobs:
               open(p, "w").write("\n".join(lines))
               print(f"OK: patched {p}")
           PY
-
-          echo ""
-          echo "=== Verify compiler-wrapper patch (first 25 lines) ==="
-          for p in $(find /opt/chaquopy -name "compiler-wrapper.py"); do
-            echo "--- $p ---"
-            head -25 "$p"
-          done
 
       - name: Download Android Python target
         run: |
@@ -428,7 +369,7 @@ jobs:
           [ -f python/CMakeLists.txt ] || { echo "FATAL: python/CMakeLists.txt missing"; exit 1; }
           [ -f python/pyproject.toml ] || { echo "FATAL: python/pyproject.toml missing"; exit 1; }
 
-          echo "=== PATCH_V25_MARKER ==="
+          echo "=== PATCH_V26_MARKER ==="
           rm -rf python/cmake_modules
           cp -a cpp/cmake_modules python/cmake_modules
 
