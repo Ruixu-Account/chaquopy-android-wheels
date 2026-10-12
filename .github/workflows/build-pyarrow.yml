@@ -69,9 +69,12 @@ jobs:
       - name: Patch Chaquopy build-wheel.py
         run: |
           cat > /tmp/patch_bw.py <<'PATCH_EOF'
+          import re, sys
+
           p = "/opt/chaquopy/server/pypi/build-wheel.py"
           src = open(p).read()
 
+          # === patch 1/2/3：原有内容 ===
           old1 = 'python_executable=f"{self.build_env}/bin/python")'
           new1 = 'python_executable=f"{self.build_env}/bin/python{self.python}")'
           if old1 not in src: raise SystemExit("patch1 not found")
@@ -85,6 +88,7 @@ jobs:
           old3 = '            return self.builder.build("wheel", "dist")'
           new3 = '''            py_include = f"{self.host_env}/chaquopy/include/python{self.python}"
                       py_lib = f"{self.host_env}/chaquopy/lib/libpython{self.python}.so"
+                      py_lib_dir = f"{self.host_env}/chaquopy/lib"
                       import os, sys, glob, shutil
                       host_python = sys.executable
                       hp = "/opt/hostedtoolcache/Python/3.12.15/x64/bin/python3.12"
@@ -118,10 +122,8 @@ jobs:
                       assert os.path.isdir(arrow_include), f"missing {arrow_include}"
                       print(f"Chaquopy: arrow_dir = {arrow_dir}")
 
-                      # === V23: 把 libarrow*.so / libparquet*.so 复制到
-                      # {host_env}/chaquopy/lib/，让 native binary 处理阶段
-                      # 把这些当作已知依赖库打进 wheel ===
-                      target_lib_dir = f"{self.host_env}/chaquopy/lib"
+                      # 把 libarrow*.so / libparquet*.so 复制到 requirements/chaquopy/lib
+                      target_lib_dir = py_lib_dir
                       os.makedirs(target_lib_dir, exist_ok=True)
                       arrow_lib_dir = f"{arrow_prefix}/lib"
                       copied = 0
@@ -143,10 +145,11 @@ jobs:
                                   copied += 1
                               except Exception as e:
                                   print(f"Chaquopy WARN: failed to copy {name}: {e}")
-                      print(f"Chaquopy: staged {copied} arrow libs into requirements")
-                      print(f"Chaquopy: target_lib_dir contents:")
-                      for n in sorted(os.listdir(target_lib_dir)):
-                          print(f"  {n}")
+                      print(f"Chaquopy: staged {copied} arrow libs")
+
+                      # === V24：让 Python 库用 soname 链接，避免绝对路径 NEEDED ===
+                      py_soname = f"-lpython{self.python}"
+                      linker_flags = f"-L{py_lib_dir} -Wl,-rpath-link,{py_lib_dir}"
 
                       return self.builder.build("wheel", "dist", config_settings={
                           "cmake.define.CMAKE_PREFIX_PATH": arrow_prefix,
@@ -188,15 +191,42 @@ jobs:
                           "cmake.define.ARROW_PYTHON": "ON",
                           "cmake.define.Python_EXECUTABLE": host_python,
                           "cmake.define.Python_INCLUDE_DIR": py_include,
-                          "cmake.define.Python_LIBRARY": py_lib,
+                          "cmake.define.Python_LIBRARY": py_soname,
+                          "cmake.define.Python3_LIBRARIES": py_soname,
+                          "cmake.define.CMAKE_EXE_LINKER_FLAGS": linker_flags,
+                          "cmake.define.CMAKE_SHARED_LINKER_FLAGS": linker_flags,
                           "cmake.define.Python3_NumPy_INCLUDE_DIR": numpy_include,
                           "cmake.define.NUMPY_LIB": "/opt/chaquopy/server/pypi/numpy-include",
                       })'''
           if old3 not in src: raise SystemExit("patch3 not found")
           src = src.replace(old3, new3, 1)
 
+          # === patch 4：兜底，捕获 "unknown library" 报错，先用 patchelf 修 NEEDED 再检查 ===
+          pat = re.compile(
+              r'(^[ \t]*)raise BuildError\(\s*f?[\'"]\{path\} is linked against unknown library',
+              re.MULTILINE
+          )
+          def repl(m):
+              indent = m.group(1)
+              return f'''{indent}if "/" in lib:
+          {indent}    import subprocess as _sp, os as _os
+          {indent}    _base = _os.path.basename(lib)
+          {indent}    try:
+          {indent}        _sp.check_call(["patchelf", "--replace-needed", lib, _base, path])
+          {indent}        print(f"Chaquopy: patchelf fixed NEEDED {{lib}} -> {{_base}} in {{path}}")
+          {indent}        continue
+          {indent}    except Exception as _e:
+          {indent}        print(f"Chaquopy WARN: patchelf failed: {{_e}}")
+          {indent}raise BuildError(f"{{path}} is linked against unknown library '{{lib}}'.")'''
+          new_src, n = pat.subn(repl, src, count=1)
+          if n > 0:
+              src = new_src
+              print(f"OK: patched unknown-library check (n={n})")
+          else:
+              print("WARN: unknown-library check pattern not found (V24 fallback not applied)")
+
           open(p, "w").write(src)
-          print("=== 3 patches ok ===")
+          print("=== patches applied ===")
           PATCH_EOF
           python3 /tmp/patch_bw.py
           wc -l /tmp/patch_bw.py
@@ -206,18 +236,15 @@ jobs:
           set -euo pipefail
           python3 - <<'PY'
           import glob
-
           candidates = glob.glob("/opt/chaquopy/**/compiler-wrapper.py", recursive=True)
           print(f"Found compiler-wrapper.py: {candidates}")
           if not candidates:
               raise SystemExit("FATAL: compiler-wrapper.py not found")
-
           for p in candidates:
               content = open(p).read()
               if "PATCHED_BY_V22" in content:
                   print(f"Already patched: {p}")
                   continue
-
               lines = content.split("\n")
               found = False
               for i, line in enumerate(lines):
@@ -230,13 +257,10 @@ jobs:
                       lines.insert(insert_at + 3, "valid_dirs.append('/opt/chaquopy')")
                       found = True
                       break
-
               if not found:
                   print(f"WARN: valid_dirs line not found in {p}")
                   continue
-
-              new_content = "\n".join(lines)
-              open(p, "w").write(new_content)
+              open(p, "w").write("\n".join(lines))
               print(f"OK: patched {p}")
           PY
 
@@ -288,16 +312,13 @@ jobs:
         run: |
           DIST_DIR="/opt/chaquopy/server/pypi/dist"
           mkdir -p "$DIST_DIR/numpy" "$DIST_DIR/chaquopy-libcxx"
-
           NUMPY_URL="https://github.com/Ruixu-Account/chaquopy-android-wheels/releases/download/latest/numpy-2.5.3-0-cp312-cp312-android_24_arm64_v8a.whl"
           wget -q "$NUMPY_URL" -O "$DIST_DIR/numpy/numpy-2.5.3-0-cp312-cp312-android_24_arm64_v8a.whl"
-
           NUMPY_INC=/opt/chaquopy/server/pypi/numpy-include
           rm -rf "$NUMPY_INC"
           mkdir -p "$NUMPY_INC"
           unzip -q "$DIST_DIR/numpy/numpy-2.5.3-0-cp312-cp312-android_24_arm64_v8a.whl" -d "$NUMPY_INC"
           ls -la "$NUMPY_INC/numpy/_core/include/" || { echo "NumPy include dir missing"; exit 1; }
-
           wget -q "https://chaquo.com/pypi-13.1/chaquopy-libcxx/chaquopy_libcxx-180000-0-py3-none-android_24_arm64_v8a.whl" -O "$DIST_DIR/chaquopy-libcxx/chaquopy_libcxx-180000-0-py3-none-android_24_arm64_v8a.whl"
           find "$DIST_DIR" -name "*.whl" -exec ls -la {} \;
 
@@ -312,7 +333,7 @@ jobs:
           [ -f python/CMakeLists.txt ] || { echo "FATAL: python/CMakeLists.txt missing"; exit 1; }
           [ -f python/pyproject.toml ] || { echo "FATAL: python/pyproject.toml missing"; exit 1; }
 
-          echo "=== PATCH_V23_MARKER ==="
+          echo "=== PATCH_V24_MARKER ==="
           rm -rf python/cmake_modules
           cp -a cpp/cmake_modules python/cmake_modules
 
@@ -355,12 +376,10 @@ jobs:
           set -euo pipefail
           F=/tmp/arrow-src/cpp/cmake_modules/ThirdpartyToolchain.cmake
           [ -f "$F" ] || { echo "FATAL: $F not found"; exit 1; }
-
           python3 - <<'PY'
           import re
           path = "/tmp/arrow-src/cpp/cmake_modules/ThirdpartyToolchain.cmake"
           content = open(path).read()
-
           pattern = re.compile(
               r'message\(\s*FATAL_ERROR\s+"(ARROW_WITH_PROTOBUF must be propagated[^"]*)"',
               re.DOTALL
@@ -370,7 +389,6 @@ jobs:
               patched = match.group(0).replace("FATAL_ERROR", "WARNING", 1)
               content = content[:match.start()] + patched + content[match.end():]
               print("OK: protobuf FATAL_ERROR -> WARNING")
-
           marker_pat = re.compile(r'(^[ \t]*resolve_dependency\s*\(\s*ZLIB\b[^)]*\))', re.MULTILINE)
           def inject(m):
               return (
@@ -384,7 +402,6 @@ jobs:
           if n > 0:
               content = new_content
               print(f"OK: injected ZLIB_SOURCE=SYSTEM (n={n})")
-
           open(path, "w").write(content)
           PY
 
@@ -400,7 +417,6 @@ jobs:
               print("OK: parse_from_android_tzdata public")
           open(path, "w").write(content)
           PY
-
           python3 - <<'PY'
           import re
           path = "/tmp/arrow-src/cpp/src/arrow/vendored/datetime/tz.cpp"
@@ -424,14 +440,11 @@ jobs:
           set -euo pipefail
           F=/tmp/arrow-src/cpp/src/arrow/vendored/musl/strptime.c
           [ -f "$F" ] || { echo "FATAL: $F not found"; exit 1; }
-
           python3 - <<'PY'
           path = "/tmp/arrow-src/cpp/src/arrow/vendored/musl/strptime.c"
           content = open(path).read()
           if "__arrow_nl_langinfo_impl" in content:
-              print("WARN: already patched")
-              raise SystemExit(0)
-
+              print("WARN: already patched"); raise SystemExit(0)
           impl = '''
           /* === ARROW Android patch: provide nl_langinfo() for bionic API < 26 === */
           #if defined(__ANDROID__) && defined(__ANDROID_API__) && (__ANDROID_API__ < 26)
@@ -445,7 +458,6 @@ jobs:
                   insert_idx = i + 1
           lines.insert(insert_idx, impl)
           content = "\n".join(lines)
-
           impl_def = '''
 
           /* === ARROW Android patch: nl_langinfo implementation === */
@@ -501,16 +513,12 @@ jobs:
               }
           }
           #endif
-          /* === end ARROW Android patch === */
           '''
           content = content + impl_def
           open(path, "w").write(content)
           print("OK: nl_langinfo implementation added")
           PY
 
-      # ============================================================
-      # Stage 1: 编译 libarrow C++ 库
-      # ============================================================
       - name: Build libarrow C++ (stage 1)
         run: |
           set -euo pipefail
@@ -519,9 +527,7 @@ jobs:
           LOG=/tmp/build-arrow-cpp.log
           TOOLCHAIN="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake"
           SYSROOT="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
-
           [ -f "$TOOLCHAIN" ] || { echo "FATAL: NDK toolchain missing"; exit 1; }
-
           ZLIB_INC=""
           ZLIB_LIB=""
           for p in "$SYSROOT/usr/include/zlib.h"; do
@@ -533,77 +539,43 @@ jobs:
               "$SYSROOT/usr/lib/libz.so"; do
             [ -f "$p" ] && ZLIB_LIB="$p" && break
           done
-
           echo "ZLIB_INC=$ZLIB_INC"
           echo "ZLIB_LIB=$ZLIB_LIB"
-
           rm -rf "$ARROW_HOME" "$BUILD_DIR"
           mkdir -p "$ARROW_HOME" "$BUILD_DIR"
-
           cd /tmp/arrow-src/cpp
-
           set +e
           cmake -B "$BUILD_DIR" -S . -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" \
-            -DANDROID_ABI=arm64-v8a \
-            -DANDROID_PLATFORM=android-24 \
-            -DANDROID_STL=c++_shared \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX="$ARROW_HOME" \
-            -DARROW_BUILD_TESTS=OFF \
-            -DARROW_BUILD_BENCHMARKS=OFF \
-            -DARROW_BUILD_EXAMPLES=OFF \
-            -DARROW_BUILD_STATIC=OFF \
-            -DARROW_BUILD_SHARED=ON \
-            -DARROW_DEPENDENCY_SOURCE=BUNDLED \
-            -DARROW_DEPENDENCY_USE_SHARED=ON \
-            -DARROW_JEMALLOC=OFF \
-            -DARROW_MIMALLOC=OFF \
-            -DARROW_SIMD_LEVEL=NONE \
-            -DARROW_RUNTIME_SIMD_LEVEL=NONE \
-            -DARROW_COMPUTE=ON \
-            -DARROW_CSV=ON \
-            -DARROW_JSON=ON \
-            -DARROW_PARQUET=ON \
-            -DARROW_DATASET=OFF \
+            -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-24 -DANDROID_STL=c++_shared \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$ARROW_HOME" \
+            -DARROW_BUILD_TESTS=OFF -DARROW_BUILD_BENCHMARKS=OFF -DARROW_BUILD_EXAMPLES=OFF \
+            -DARROW_BUILD_STATIC=OFF -DARROW_BUILD_SHARED=ON \
+            -DARROW_DEPENDENCY_SOURCE=BUNDLED -DARROW_DEPENDENCY_USE_SHARED=ON \
+            -DARROW_JEMALLOC=OFF -DARROW_MIMALLOC=OFF \
+            -DARROW_SIMD_LEVEL=NONE -DARROW_RUNTIME_SIMD_LEVEL=NONE \
+            -DARROW_COMPUTE=ON -DARROW_CSV=ON -DARROW_JSON=ON -DARROW_PARQUET=ON -DARROW_DATASET=OFF \
             -DARROW_FILESYSTEM=ON \
-            -DARROW_WITH_BROTLI=OFF \
-            -DARROW_WITH_BZ2=OFF \
-            -DARROW_WITH_LZ4=OFF \
-            -DARROW_WITH_SNAPPY=OFF \
-            -DARROW_WITH_ZLIB=ON \
-            -DZLIB_SOURCE=SYSTEM \
-            -DZLIB_USE_STATIC_LIBS=OFF \
-            -DZLIB_INCLUDE_DIR="$ZLIB_INC" \
-            -DZLIB_LIBRARY="$ZLIB_LIB" \
-            -DARROW_WITH_ZSTD=OFF \
-            -DARROW_WITH_UTF8PROC=OFF \
-            -DARROW_WITH_RE2=OFF \
-            -DARROW_WITH_GRPC=OFF \
-            -DARROW_WITH_THRIFT=OFF \
+            -DARROW_WITH_BROTLI=OFF -DARROW_WITH_BZ2=OFF -DARROW_WITH_LZ4=OFF -DARROW_WITH_SNAPPY=OFF \
+            -DARROW_WITH_ZLIB=ON -DZLIB_SOURCE=SYSTEM -DZLIB_USE_STATIC_LIBS=OFF \
+            -DZLIB_INCLUDE_DIR="$ZLIB_INC" -DZLIB_LIBRARY="$ZLIB_LIB" \
+            -DARROW_WITH_ZSTD=OFF -DARROW_WITH_UTF8PROC=OFF -DARROW_WITH_RE2=OFF \
+            -DARROW_WITH_GRPC=OFF -DARROW_WITH_THRIFT=OFF \
             -DARROW_WITH_PROTOBUF=ON \
             -DARROW_PROTOBUF_ARROW_CMAKE_PACKAGE_NAME=protobuf \
             -DARROW_PROTOBUF_ARROW_PC_PACKAGE_NAME=protobuf \
-            -DARROW_WITH_BOOST=OFF \
-            -DARROW_S3=OFF \
-            -DARROW_GCS=OFF \
-            -DARROW_HDFS=OFF \
-            -DARROW_FLIGHT=OFF \
-            -DARROW_GANDIVA=OFF \
-            -DARROW_ACERO=OFF \
+            -DARROW_WITH_BOOST=OFF -DARROW_S3=OFF -DARROW_GCS=OFF -DARROW_HDFS=OFF \
+            -DARROW_FLIGHT=OFF -DARROW_GANDIVA=OFF -DARROW_ACERO=OFF \
             -DARROW_PYTHON=OFF \
-            -DPROTOBUF_INSTALL=ON \
-            -DProtobuf_SOURCE=BUNDLED \
+            -DPROTOBUF_INSTALL=ON -DProtobuf_SOURCE=BUNDLED \
             2>&1 | tee "$LOG"
           CMAKE_RC=${PIPESTATUS[0]}
           set -e
           if [ "$CMAKE_RC" -ne 0 ]; then
-            echo "=== CMake config FAILED, last 120 lines ==="
+            echo "=== CMake config FAILED ==="
             tail -120 "$LOG"
-            echo "::error::libarrow CMake configure failed"
             exit 1
           fi
-
           set +e
           cmake --build "$BUILD_DIR" --target install -j4 2>&1 | tee -a "$LOG"
           BUILD_RC=${PIPESTATUS[0]}
@@ -615,7 +587,6 @@ jobs:
             echo "::error::libarrow build failed"
             exit 1
           fi
-
           echo ""
           echo "=== $ARROW_HOME layout ==="
           find "$ARROW_HOME" -maxdepth 4 -type d | head -40
@@ -623,6 +594,8 @@ jobs:
           find "$ARROW_HOME" -name "ArrowConfig.cmake" -o -name "arrow-config.cmake" || echo "(not found!)"
           echo "=== filesystem header ==="
           ls -la "$ARROW_HOME/include/arrow/filesystem/api.h" || echo "(missing api.h)"
+          echo "=== libarrow libs ==="
+          ls -la "$ARROW_HOME/lib/" | grep -E "libarrow|libparquet" || true
 
       - name: Prepare pyarrow recipe
         run: |
@@ -680,11 +653,9 @@ jobs:
           rm -rf "$CHECK_DIR"
           mkdir -p "$CHECK_DIR"
           unzip -q "$WHEEL" -d "$CHECK_DIR"
-
           echo ""
           echo "=== [1] All .so files ==="
           find "$CHECK_DIR" -name "*.so" -type f | sort | sed "s|$CHECK_DIR/||"
-
           echo ""
           echo "=== [2] Per-file NEEDED / SONAME ==="
           find "$CHECK_DIR" -name "*.so" -type f -exec sh -c '
@@ -693,13 +664,11 @@ jobs:
               readelf -d "$so" 2>/dev/null | grep -E "NEEDED|SONAME" || echo "  (none)"
             done
           ' _ {} \;
-
           echo ""
           echo "=== [3] Aggregated NEEDED ==="
           find "$CHECK_DIR" -name "*.so" -type f -exec sh -c '
             readelf -d "$1" 2>/dev/null | grep "NEEDED" || true
           ' _ {} \; | sed -E 's/.*\[(.*)\]/\1/' | sort -u
-
           echo ""
           echo "=== [4] Architecture check ==="
           find "$CHECK_DIR" -name "*.so" -type f -exec file {} \; | sed "s|$CHECK_DIR/||" | head -30
