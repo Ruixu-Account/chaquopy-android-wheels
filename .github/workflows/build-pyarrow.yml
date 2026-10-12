@@ -85,7 +85,7 @@ jobs:
           old3 = '            return self.builder.build("wheel", "dist")'
           new3 = '''            py_include = f"{self.host_env}/chaquopy/include/python{self.python}"
                       py_lib = f"{self.host_env}/chaquopy/lib/libpython{self.python}.so"
-                      import os, sys, glob
+                      import os, sys, glob, shutil
                       host_python = sys.executable
                       hp = "/opt/hostedtoolcache/Python/3.12.15/x64/bin/python3.12"
                       if os.path.exists(hp): host_python = hp
@@ -111,22 +111,42 @@ jobs:
                           if hits:
                               arrow_dir = os.path.dirname(hits[0])
                               print(f"Chaquopy: ArrowConfig.cmake found via glob: {hits[0]}")
-                      if arrow_dir is None:
-                          print("Chaquopy: arrow_install tree (depth<=3):")
-                          for root, dirs, files in os.walk(arrow_prefix):
-                              depth = root[len(arrow_prefix):].count(os.sep)
-                              if depth > 3:
-                                  dirs[:] = []
-                                  continue
-                              print(f"  {root}")
-                              for f in files[:30]:
-                                  print(f"    {f}")
 
                       assert arrow_dir is not None, f"ArrowConfig.cmake not found under {arrow_prefix}"
                       assert os.path.isdir(arrow_dir), f"missing {arrow_dir}"
                       assert os.path.isdir(numpy_include), f"missing {numpy_include}"
                       assert os.path.isdir(arrow_include), f"missing {arrow_include}"
                       print(f"Chaquopy: arrow_dir = {arrow_dir}")
+
+                      # === V23: 把 libarrow*.so / libparquet*.so 复制到
+                      # {host_env}/chaquopy/lib/，让 native binary 处理阶段
+                      # 把这些当作已知依赖库打进 wheel ===
+                      target_lib_dir = f"{self.host_env}/chaquopy/lib"
+                      os.makedirs(target_lib_dir, exist_ok=True)
+                      arrow_lib_dir = f"{arrow_prefix}/lib"
+                      copied = 0
+                      if os.path.isdir(arrow_lib_dir):
+                          for name in sorted(os.listdir(arrow_lib_dir)):
+                              if not (name.startswith("libarrow") or name.startswith("libparquet")):
+                                  continue
+                              if not (name.endswith(".so") or ".so." in name):
+                                  continue
+                              src_path = os.path.join(arrow_lib_dir, name)
+                              dst_path = os.path.join(target_lib_dir, name)
+                              try:
+                                  if os.path.islink(src_path):
+                                      real = os.path.realpath(src_path)
+                                      shutil.copy2(real, dst_path)
+                                  else:
+                                      shutil.copy2(src_path, dst_path)
+                                  print(f"Chaquopy: staged {name} -> {target_lib_dir}")
+                                  copied += 1
+                              except Exception as e:
+                                  print(f"Chaquopy WARN: failed to copy {name}: {e}")
+                      print(f"Chaquopy: staged {copied} arrow libs into requirements")
+                      print(f"Chaquopy: target_lib_dir contents:")
+                      for n in sorted(os.listdir(target_lib_dir)):
+                          print(f"  {n}")
 
                       return self.builder.build("wheel", "dist", config_settings={
                           "cmake.define.CMAKE_PREFIX_PATH": arrow_prefix,
@@ -292,7 +312,7 @@ jobs:
           [ -f python/CMakeLists.txt ] || { echo "FATAL: python/CMakeLists.txt missing"; exit 1; }
           [ -f python/pyproject.toml ] || { echo "FATAL: python/pyproject.toml missing"; exit 1; }
 
-          echo "=== PATCH_V22_MARKER ==="
+          echo "=== PATCH_V23_MARKER ==="
           rm -rf python/cmake_modules
           cp -a cpp/cmake_modules python/cmake_modules
 
@@ -490,7 +510,6 @@ jobs:
 
       # ============================================================
       # Stage 1: 编译 libarrow C++ 库
-      # 【V22 关键改动】ARROW_FILESYSTEM=ON（pyarrow 的 _fs 模块需要）
       # ============================================================
       - name: Build libarrow C++ (stage 1)
         run: |
