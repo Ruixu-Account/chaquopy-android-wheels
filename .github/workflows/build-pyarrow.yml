@@ -88,19 +88,16 @@ jobs:
           p = "/opt/chaquopy/server/pypi/build-wheel.py"
           src = open(p).read()
 
-          # === patch 1: python_executable 修复 ===
           old1 = 'python_executable=f"{self.build_env}/bin/python")'
           new1 = 'python_executable=f"{self.build_env}/bin/python{self.python}")'
           if old1 not in src: raise SystemExit("patch1 not found")
           src = src.replace(old1, new1, 1)
 
-          # === patch 2: PYO3_CROSS_LIB_DIR ===
           old2 = '            "PYO3_CROSS_PYTHON_VERSION": self.python,\n        })'
           new2 = '            "PYO3_CROSS_PYTHON_VERSION": self.python,\n            "PYO3_CROSS_LIB_DIR": f"{self.host_env}/chaquopy/lib",\n        })'
           if old2 not in src: raise SystemExit("patch2 not found")
           src = src.replace(old2, new2, 1)
 
-          # === patch 3: config_settings ===
           old3 = '            return self.builder.build("wheel", "dist")'
           new3 = '''            py_include = f"{self.host_env}/chaquopy/include/python{self.python}"
                       py_lib = f"{self.host_env}/chaquopy/lib/libpython{self.python}.so"
@@ -253,7 +250,6 @@ jobs:
           if old3 not in src: raise SystemExit("patch3 not found")
           src = src.replace(old3, new3, 1)
 
-          # === patch 4 (V28): 在 check_requirements 入口注入 patchelf 修正 ===
           old_creq = "    def check_requirements(self, filename, available_libs):"
           if old_creq not in src:
               print("WARN: check_requirements anchor not found")
@@ -386,7 +382,7 @@ jobs:
           [ -f python/CMakeLists.txt ] || { echo "FATAL: python/CMakeLists.txt missing"; exit 1; }
           [ -f python/pyproject.toml ] || { echo "FATAL: python/pyproject.toml missing"; exit 1; }
 
-          echo "=== PATCH_V28_MARKER ==="
+          echo "=== PATCH_V29_MARKER ==="
           rm -rf python/cmake_modules
           cp -a cpp/cmake_modules python/cmake_modules
 
@@ -691,6 +687,92 @@ jobs:
             echo "::error::pyarrow build failed"
             exit 1
           fi
+
+      # ============================================================
+      # V29 新增：post-process pyarrow wheel，把 libarrow*.so / libparquet*.so
+      # 塞进 wheel 的 pyarrow/ 目录。Chaquopy 的 fix_wheel 只把它们当作"已满足的依赖"，
+      # 从不复制到最终 wheel，所以必须在 wheel 造好之后手动补。
+      # ============================================================
+      - name: Post-process pyarrow wheel (inject arrow libs)
+        if: success()
+        run: |
+          set -euo pipefail
+          DIST_DIR="/opt/chaquopy/server/pypi/dist/pyarrow"
+          WHEEL=$(find "$DIST_DIR" -name "*android_*.whl" | head -1)
+          [ -n "$WHEEL" ] || { echo "FATAL: no android wheel found"; exit 1; }
+          echo "=== Wheel: $WHEEL ==="
+          ls -la "$WHEEL"
+
+          ARROW_LIB_DIR="/opt/chaquopy/server/pypi/arrow-install/lib"
+          [ -d "$ARROW_LIB_DIR" ] || { echo "FATAL: $ARROW_LIB_DIR missing"; exit 1; }
+          echo "=== arrow-install/lib contents ==="
+          ls -la "$ARROW_LIB_DIR" || true
+
+          python3 - "$WHEEL" "$ARROW_LIB_DIR" <<'PY'
+          import sys, os, zipfile, glob
+
+          wheel_path = sys.argv[1]
+          arrow_lib_dir = sys.argv[2]
+
+          # 找出所有需要打包的库：libarrow* 和 libparquet*（跳过 libc++）
+          wanted_patterns = ["libarrow*.so", "libarrow*.so.*", "libparquet*.so", "libparquet*.so.*"]
+          wanted_files = []
+          for pat in wanted_patterns:
+              for p in glob.glob(os.path.join(arrow_lib_dir, pat)):
+                  name = os.path.basename(p)
+                  if name.startswith("libc++"):
+                      continue
+                  wanted_files.append((p, name))
+          # 去重
+          seen = set()
+          uniq = []
+          for p, n in wanted_files:
+              if n in seen:
+                  continue
+              seen.add(n)
+              uniq.append((p, n))
+
+          print(f"=== libs to inject: {[n for _, n in uniq]} ===")
+
+          with zipfile.ZipFile(wheel_path, "r") as zin:
+              existing = set(zin.namelist())
+              print(f"=== existing pyarrow/*.so in wheel ===")
+              for n in sorted(existing):
+                  if n.startswith("pyarrow/") and n.endswith(".so"):
+                      print(f"  {n}")
+
+              to_add = []
+              for src, name in uniq:
+                  arc = f"pyarrow/{name}"
+                  if arc in existing:
+                      print(f"  already present: {arc}")
+                      continue
+                  to_add.append((src, arc))
+
+              if not to_add:
+                  print("=== nothing to add, wheel unchanged ===")
+                  sys.exit(0)
+
+              tmp = wheel_path + ".tmp"
+              with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:
+                  # 保留所有原 entry（含 dist-info / RECORD 等）
+                  for item in zin.infolist():
+                      zout.writestr(item, zin.read(item.filename))
+                  # 追加新库
+                  for src, arc in to_add:
+                      print(f"=== injecting {arc} (from {src}) ===")
+                      zout.write(src, arc)
+
+              os.replace(tmp, wheel_path)
+              print(f"=== done. wheel size: {os.path.getsize(wheel_path)} ===")
+          PY
+
+          echo ""
+          echo "=== after post-process: wheel contents (pyarrow/*.so) ==="
+          unzip -l "$WHEEL" | grep -E "pyarrow/.*\.so" | head -40 || true
+          echo ""
+          echo "=== final wheel ==="
+          ls -la "$WHEEL"
 
       - name: Check shared library dependencies
         if: success()
