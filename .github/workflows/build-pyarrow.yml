@@ -235,8 +235,40 @@ jobs:
           if old3 not in src: raise SystemExit("patch3 not found")
           src = src.replace(old3, new3, 1)
 
+          # === patch 4 (V32): check_requirements 入口注入 patchelf 自愈 ===
+          old_creq = "    def check_requirements(self, filename, available_libs):"
+          if old_creq not in src:
+              print("WARN: check_requirements anchor not found")
+          elif "V32_PATCHELF_INJECTED" in src:
+              print("Already patched with V32_PATCHELF_INJECTED")
+          else:
+              inject_lines = [
+                  "    def check_requirements(self, filename, available_libs):",
+                  "        # V32_PATCHELF_INJECTED: normalize absolute NEEDED paths before checking",
+                  "        import subprocess as _sp",
+                  "        try:",
+                  "            _out = _sp.check_output(['readelf', '-d', filename], stderr=_sp.DEVNULL).decode('utf-8', 'replace')",
+                  "        except Exception:",
+                  "            _out = ''",
+                  "        for _l in _out.splitlines():",
+                  "            if 'NEEDED' not in _l or '[' not in _l or ']' not in _l:",
+                  "                continue",
+                  "            _lib = _l.split('[', 1)[1].split(']', 1)[0]",
+                  "            if '/' in _lib:",
+                  "                _base = _lib.rsplit('/', 1)[-1]",
+                  "                try:",
+                  "                    _sp.check_call(['patchelf', '--replace-needed', _lib, _base, filename])",
+                  "                    log(f'patchelf: {_lib} -> {_base} in {filename}')",
+                  "                except Exception as _e:",
+                  "                    log(f'Warning: patchelf failed: {_e}')",
+                  "        # === end V32 patch ===",
+              ]
+              new_creq = "\n".join(inject_lines)
+              src = src.replace(old_creq, new_creq, 1)
+              print("OK: V32 patchelf injected into check_requirements")
+
           open(p, "w").write(src)
-          print("=== 3 patches ok ===")
+          print("=== patches applied ===")
           PATCH_EOF
           python3 /tmp/patch_bw.py
           wc -l /tmp/patch_bw.py
@@ -336,7 +368,7 @@ jobs:
           [ -f python/CMakeLists.txt ] || { echo "FATAL: python/CMakeLists.txt missing"; exit 1; }
           [ -f python/pyproject.toml ] || { echo "FATAL: python/pyproject.toml missing"; exit 1; }
 
-          echo "=== PATCH_V31_MARKER ==="
+          echo "=== PATCH_V32_MARKER ==="
           rm -rf python/cmake_modules
           cp -a cpp/cmake_modules python/cmake_modules
 
@@ -643,11 +675,10 @@ jobs:
           fi
 
       # ============================================================
-      # V31: post-process pyarrow wheel
-      # 解压 → 注入 arrow libs → 全局 strip / rpath / normalize
-      # → 用 `wheel pack` 重打包（自动重算 RECORD 哈希）
+      # V32: post-process (inject + strip + rpath + normalize + wheel pack)
+      # 注意：这一层的 normalize 是保险，主修在 check_requirements 注入
       # ============================================================
-      - name: Post-process pyarrow wheel (inject + strip + rpath + normalize + repack)
+      - name: Post-process pyarrow wheel
         if: success()
         run: |
           set -euo pipefail
@@ -661,7 +692,6 @@ jobs:
           [ -d "$ARROW_LIB_DIR" ] || { echo "FATAL: $ARROW_LIB_DIR missing"; exit 1; }
           [ -x "$LLVM_STRIP" ] || { echo "FATAL: llvm-strip missing: $LLVM_STRIP"; exit 1; }
 
-          # 确保 wheel 工具可用（用于重新生成 RECORD）
           python3 -m pip install --quiet --upgrade wheel
 
           WORK=/tmp/pyarrow-postprocess
@@ -672,10 +702,7 @@ jobs:
 
           echo "=== unpacked top-level ==="
           ls -la unpacked | head -20
-          echo "=== dist-info dir ==="
-          ls -d unpacked/*.dist-info || true
 
-          # 1) 注入 libarrow* / libparquet*
           copied=0
           for f in "$ARROW_LIB_DIR"/libarrow*.so* "$ARROW_LIB_DIR"/libparquet*.so*; do
             [ -e "$f" ] || continue
@@ -687,7 +714,6 @@ jobs:
           done
           echo "=== total injected: $copied ==="
 
-          # 2) 遍历 pyarrow/ 下所有 .so*：strip → replace-needed → set-rpath $ORIGIN
           echo "=== processing .so files ==="
           processed=0
           while IFS= read -r so; do
@@ -713,36 +739,21 @@ jobs:
           done < <(find unpacked/pyarrow -type f \( -name "*.so" -o -name "*.so.*" \) | sort)
           echo "=== processed $processed .so files ==="
 
-          # 3) 用 wheel pack 重打包（自动重算 RECORD）
           echo "=== repacking with wheel pack (regenerates RECORD) ==="
           python3 -m wheel pack "$WORK/unpacked" -d "$WORK/out"
-          echo "=== wheel pack output ==="
           ls -la "$WORK/out"
 
           NEW=$(find "$WORK/out" -name "*.whl" | head -1)
           [ -n "$NEW" ] || { echo "FATAL: wheel pack produced nothing"; exit 1; }
           echo "=== new wheel: $NEW ($(stat -c%s "$NEW") bytes) ==="
 
-          # 4) 用新 wheel 覆盖原 wheel
           cp -f "$NEW" "$WHEEL"
           echo "=== replaced original wheel ($(stat -c%s "$WHEEL") bytes) ==="
 
-          # 5) 校验 1：最终 wheel 里的 .so 列表
           echo ""
           echo "=== verify 1: final wheel pyarrow/*.so ==="
           unzip -l "$WHEEL" | grep -E "pyarrow/.*\.so" | sort || true
 
-          # 6) 校验 2：RECORD 重算了没
-          echo ""
-          echo "=== verify 2: RECORD line count ==="
-          DIST_INFO_DIR=$(unzip -l "$WHEEL" | grep -oE "[^/]+\.dist-info" | head -1)
-          echo "  dist-info dir: $DIST_INFO_DIR"
-          unzip -p "$WHEEL" "$DIST_INFO_DIR/RECORD" | wc -l
-          echo "  (total RECORD lines)"
-          echo "  last 5 RECORD entries:"
-          unzip -p "$WHEEL" "$DIST_INFO_DIR/RECORD" | tail -5
-
-          # 7) 校验 3：_compute.so / _parquet.so / lib.so / libarrow.so NEEDED/RUNPATH
           echo ""
           echo "=== verify 3: NEEDED/RUNPATH ==="
           rm -rf /tmp/pyarrow-verify
@@ -770,14 +781,6 @@ jobs:
           echo ""
           echo "=== [1] All .so files ==="
           find "$CHECK_DIR" -name "*.so" -type f | sort | sed "s|$CHECK_DIR/||"
-          echo ""
-          echo "=== [2] Per-file NEEDED / SONAME ==="
-          find "$CHECK_DIR" -name "*.so" -type f -exec sh -c '
-            for so; do
-              echo "--- ${so#'"$CHECK_DIR"'/} ---"
-              readelf -d "$so" 2>/dev/null | grep -E "NEEDED|SONAME|RUNPATH|RPATH" || echo "  (none)"
-            done
-          ' _ {} \;
           echo ""
           echo "=== [3] Aggregated NEEDED ==="
           find "$CHECK_DIR" -name "*.so" -type f -exec sh -c '
