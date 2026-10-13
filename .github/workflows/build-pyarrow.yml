@@ -50,21 +50,6 @@ jobs:
       - name: Install Chaquopy build requirements
         run: pip install -r /opt/chaquopy/server/pypi/requirements.txt
 
-      - name: Inspect check_requirements source
-        run: |
-          set -euo pipefail
-          F=/opt/chaquopy/server/pypi/build-wheel.py
-          echo "=== total lines: $(wc -l < "$F") ==="
-          echo ""
-          echo "=== def check_requirements line ==="
-          grep -n "def check_requirements" "$F" || echo "(not found)"
-          echo ""
-          echo "=== dump lines 770-930 (fix_wheel + check_requirements) ==="
-          sed -n '770,930p' "$F" | nl -ba -v 770
-          echo ""
-          echo "=== grep all 'unknown library' ==="
-          grep -n "unknown library" "$F" || echo "(not found)"
-
       - name: Set Android env vars
         run: |
           echo "ANDROID_HOME=/usr/local/lib/android/sdk" >> $GITHUB_ENV
@@ -250,39 +235,8 @@ jobs:
           if old3 not in src: raise SystemExit("patch3 not found")
           src = src.replace(old3, new3, 1)
 
-          old_creq = "    def check_requirements(self, filename, available_libs):"
-          if old_creq not in src:
-              print("WARN: check_requirements anchor not found")
-          elif "V28_PATCHELF_INJECTED" in src:
-              print("Already patched with V28_PATCHELF_INJECTED")
-          else:
-              inject_lines = [
-                  "    def check_requirements(self, filename, available_libs):",
-                  "        # V28_PATCHELF_INJECTED: normalize absolute NEEDED paths before checking",
-                  "        import subprocess as _sp",
-                  "        try:",
-                  "            _out = _sp.check_output(['readelf', '-d', filename], stderr=_sp.DEVNULL).decode('utf-8', 'replace')",
-                  "        except Exception:",
-                  "            _out = ''",
-                  "        for _l in _out.splitlines():",
-                  "            if 'NEEDED' not in _l or '[' not in _l or ']' not in _l:",
-                  "                continue",
-                  "            _lib = _l.split('[', 1)[1].split(']', 1)[0]",
-                  "            if '/' in _lib:",
-                  "                _base = _lib.rsplit('/', 1)[-1]",
-                  "                try:",
-                  "                    _sp.check_call(['patchelf', '--replace-needed', _lib, _base, filename])",
-                  "                    log(f'patchelf: {_lib} -> {_base} in {filename}')",
-                  "                except Exception as _e:",
-                  "                    log(f'Warning: patchelf failed: {_e}')",
-                  "        # === end V28 patch ===",
-              ]
-              new_creq = "\n".join(inject_lines)
-              src = src.replace(old_creq, new_creq, 1)
-              print("OK: V28 patchelf injected into check_requirements")
-
           open(p, "w").write(src)
-          print("=== patches applied ===")
+          print("=== 3 patches ok ===")
           PATCH_EOF
           python3 /tmp/patch_bw.py
           wc -l /tmp/patch_bw.py
@@ -382,7 +336,7 @@ jobs:
           [ -f python/CMakeLists.txt ] || { echo "FATAL: python/CMakeLists.txt missing"; exit 1; }
           [ -f python/pyproject.toml ] || { echo "FATAL: python/pyproject.toml missing"; exit 1; }
 
-          echo "=== PATCH_V29_MARKER ==="
+          echo "=== PATCH_V30_MARKER ==="
           rm -rf python/cmake_modules
           cp -a cpp/cmake_modules python/cmake_modules
 
@@ -689,90 +643,97 @@ jobs:
           fi
 
       # ============================================================
-      # V29 新增：post-process pyarrow wheel，把 libarrow*.so / libparquet*.so
-      # 塞进 wheel 的 pyarrow/ 目录。Chaquopy 的 fix_wheel 只把它们当作"已满足的依赖"，
-      # 从不复制到最终 wheel，所以必须在 wheel 造好之后手动补。
+      # V30: post-process pyarrow wheel — 解压 → 注入 arrow libs → 对所有 .so
+      # strip / normalize NEEDED / set rpath $ORIGIN → 重打包
       # ============================================================
-      - name: Post-process pyarrow wheel (inject arrow libs)
+      - name: Post-process pyarrow wheel (inject + strip + rpath + normalize)
         if: success()
         run: |
           set -euo pipefail
           DIST_DIR="/opt/chaquopy/server/pypi/dist/pyarrow"
           WHEEL=$(find "$DIST_DIR" -name "*android_*.whl" | head -1)
           [ -n "$WHEEL" ] || { echo "FATAL: no android wheel found"; exit 1; }
-          echo "=== Wheel: $WHEEL ==="
+          echo "=== Wheel before: $WHEEL ==="
           ls -la "$WHEEL"
 
           ARROW_LIB_DIR="/opt/chaquopy/server/pypi/arrow-install/lib"
+          LLVM_STRIP="/usr/local/lib/android/sdk/ndk/27.3.13750724/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
           [ -d "$ARROW_LIB_DIR" ] || { echo "FATAL: $ARROW_LIB_DIR missing"; exit 1; }
-          echo "=== arrow-install/lib contents ==="
-          ls -la "$ARROW_LIB_DIR" || true
+          [ -x "$LLVM_STRIP" ] || { echo "FATAL: llvm-strip missing: $LLVM_STRIP"; exit 1; }
 
-          python3 - "$WHEEL" "$ARROW_LIB_DIR" <<'PY'
-          import sys, os, zipfile, glob
+          WORK=/tmp/pyarrow-postprocess
+          rm -rf "$WORK"
+          mkdir -p "$WORK"
+          cd "$WORK"
+          unzip -q "$WHEEL" -d unpacked
+          echo "=== unpacked top-level ==="
+          ls -la unpacked | head -20
+          echo "=== unpacked/pyarrow/*.so before inject ==="
+          find unpacked/pyarrow -maxdepth 1 -name "*.so" -o -maxdepth 1 -name "*.so.*" | sort || true
 
-          wheel_path = sys.argv[1]
-          arrow_lib_dir = sys.argv[2]
+          # 1) 复制 libarrow* / libparquet* 到 unpacked/pyarrow/
+          copied=0
+          for f in "$ARROW_LIB_DIR"/libarrow*.so* "$ARROW_LIB_DIR"/libparquet*.so*; do
+            [ -e "$f" ] || continue
+            base=$(basename "$f")
+            case "$base" in
+              libc++*) continue ;;
+            esac
+            cp -f "$f" "unpacked/pyarrow/$base"
+            copied=$((copied+1))
+            echo "=== injected pyarrow/$base ($(stat -c%s "$f") bytes) ==="
+          done
+          echo "=== total injected: $copied ==="
 
-          # 找出所有需要打包的库：libarrow* 和 libparquet*（跳过 libc++）
-          wanted_patterns = ["libarrow*.so", "libarrow*.so.*", "libparquet*.so", "libparquet*.so.*"]
-          wanted_files = []
-          for pat in wanted_patterns:
-              for p in glob.glob(os.path.join(arrow_lib_dir, pat)):
-                  name = os.path.basename(p)
-                  if name.startswith("libc++"):
-                      continue
-                  wanted_files.append((p, name))
-          # 去重
-          seen = set()
-          uniq = []
-          for p, n in wanted_files:
-              if n in seen:
-                  continue
-              seen.add(n)
-              uniq.append((p, n))
+          # 2) 遍历 unpacked/pyarrow/*.so（含刚注入的 + 原有的）：
+          #    strip → replace-needed（绝对路径）→ set rpath $ORIGIN
+          echo "=== processing .so files ==="
+          processed=0
+          while IFS= read -r so; do
+            [ -f "$so" ] || continue
+            echo "--- $so ---"
+            # strip
+            "$LLVM_STRIP" --strip-unneeded "$so" || echo "WARN: strip failed on $so"
+            # normalize NEEDED
+            while IFS= read -r needed; do
+              case "$needed" in
+                /*)
+                  base=$(basename "$needed")
+                  patchelf --replace-needed "$needed" "$base" "$so" || echo "WARN: replace-needed failed"
+                  echo "  normalized: $needed -> $base"
+                  ;;
+              esac
+            done < <(readelf -d "$so" | grep NEEDED | sed -E 's/.*\[(.*)\]/\1/')
+            # set rpath $ORIGIN
+            patchelf --set-rpath '$ORIGIN' "$so" || echo "WARN: set-rpath failed on $so"
+            processed=$((processed+1))
+          done < <(find unpacked/pyarrow -maxdepth 1 -type f \( -name "*.so" -o -name "*.so.*" \) | sort)
+          echo "=== processed $processed .so files ==="
 
-          print(f"=== libs to inject: {[n for _, n in uniq]} ===")
+          # 3) 重新打包 wheel（保留原文件名/顺序无关紧要，pyarrow 用 pip 解析 wheel 只认元数据）
+          NEW_WHEEL="$WHEEL"
+          TMP_WHEEL="${WHEEL}.tmp"
+          (cd unpacked && zip -qr "$TMP_WHEEL" .)
+          mv -f "$TMP_WHEEL" "$NEW_WHEEL"
+          echo "=== Wheel after: $(stat -c%s "$NEW_WHEEL") bytes ==="
 
-          with zipfile.ZipFile(wheel_path, "r") as zin:
-              existing = set(zin.namelist())
-              print(f"=== existing pyarrow/*.so in wheel ===")
-              for n in sorted(existing):
-                  if n.startswith("pyarrow/") and n.endswith(".so"):
-                      print(f"  {n}")
-
-              to_add = []
-              for src, name in uniq:
-                  arc = f"pyarrow/{name}"
-                  if arc in existing:
-                      print(f"  already present: {arc}")
-                      continue
-                  to_add.append((src, arc))
-
-              if not to_add:
-                  print("=== nothing to add, wheel unchanged ===")
-                  sys.exit(0)
-
-              tmp = wheel_path + ".tmp"
-              with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:
-                  # 保留所有原 entry（含 dist-info / RECORD 等）
-                  for item in zin.infolist():
-                      zout.writestr(item, zin.read(item.filename))
-                  # 追加新库
-                  for src, arc in to_add:
-                      print(f"=== injecting {arc} (from {src}) ===")
-                      zout.write(src, arc)
-
-              os.replace(tmp, wheel_path)
-              print(f"=== done. wheel size: {os.path.getsize(wheel_path)} ===")
-          PY
-
+          # 4) 打印最终 wheel 内容
           echo ""
-          echo "=== after post-process: wheel contents (pyarrow/*.so) ==="
-          unzip -l "$WHEEL" | grep -E "pyarrow/.*\.so" | head -40 || true
+          echo "=== final wheel pyarrow/*.so ==="
+          unzip -l "$NEW_WHEEL" | grep -E "pyarrow/.*\.so" | sort || true
+
+          # 5) 校验：抽两个关键 .so 看 NEEDED / RUNPATH
           echo ""
-          echo "=== final wheel ==="
-          ls -la "$WHEEL"
+          echo "=== verify _compute.so NEEDED/RUNPATH ==="
+          rm -rf /tmp/pyarrow-verify
+          mkdir -p /tmp/pyarrow-verify
+          unzip -q -o "$NEW_WHEEL" -d /tmp/pyarrow-verify
+          for f in pyarrow/_compute.so pyarrow/_parquet.so pyarrow/lib.so; do
+            if [ -f "/tmp/pyarrow-verify/$f" ]; then
+              echo "--- $f ---"
+              readelf -d "/tmp/pyarrow-verify/$f" | grep -E "NEEDED|RUNPATH|RPATH" || true
+            fi
+          done
 
       - name: Check shared library dependencies
         if: success()
@@ -794,7 +755,7 @@ jobs:
           find "$CHECK_DIR" -name "*.so" -type f -exec sh -c '
             for so; do
               echo "--- ${so#'"$CHECK_DIR"'/} ---"
-              readelf -d "$so" 2>/dev/null | grep -E "NEEDED|SONAME" || echo "  (none)"
+              readelf -d "$so" 2>/dev/null | grep -E "NEEDED|SONAME|RUNPATH|RPATH" || echo "  (none)"
             done
           ' _ {} \;
           echo ""
@@ -808,7 +769,9 @@ jobs:
 
       - name: List built wheels
         if: always()
-        run: find /opt/chaquopy/server/pypi/dist/pyarrow -name "*.whl" -exec ls -la {} \; || true
+        run: |
+          echo "=== final wheel size ==="
+          find /opt/chaquopy/server/pypi/dist/pyarrow -name "*.whl" -exec ls -la {} \; || true
 
       - name: Collect android wheel
         if: success()
