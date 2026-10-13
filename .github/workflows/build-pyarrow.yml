@@ -336,7 +336,7 @@ jobs:
           [ -f python/CMakeLists.txt ] || { echo "FATAL: python/CMakeLists.txt missing"; exit 1; }
           [ -f python/pyproject.toml ] || { echo "FATAL: python/pyproject.toml missing"; exit 1; }
 
-          echo "=== PATCH_V30_MARKER ==="
+          echo "=== PATCH_V31_MARKER ==="
           rm -rf python/cmake_modules
           cp -a cpp/cmake_modules python/cmake_modules
 
@@ -643,95 +643,115 @@ jobs:
           fi
 
       # ============================================================
-      # V30: post-process pyarrow wheel — 解压 → 注入 arrow libs → 对所有 .so
-      # strip / normalize NEEDED / set rpath $ORIGIN → 重打包
+      # V31: post-process pyarrow wheel
+      # 解压 → 注入 arrow libs → 全局 strip / rpath / normalize
+      # → 用 `wheel pack` 重打包（自动重算 RECORD 哈希）
       # ============================================================
-      - name: Post-process pyarrow wheel (inject + strip + rpath + normalize)
+      - name: Post-process pyarrow wheel (inject + strip + rpath + normalize + repack)
         if: success()
         run: |
           set -euo pipefail
           DIST_DIR="/opt/chaquopy/server/pypi/dist/pyarrow"
           WHEEL=$(find "$DIST_DIR" -name "*android_*.whl" | head -1)
           [ -n "$WHEEL" ] || { echo "FATAL: no android wheel found"; exit 1; }
-          echo "=== Wheel before: $WHEEL ==="
-          ls -la "$WHEEL"
+          echo "=== Wheel before: $WHEEL ($(stat -c%s "$WHEEL") bytes) ==="
 
           ARROW_LIB_DIR="/opt/chaquopy/server/pypi/arrow-install/lib"
           LLVM_STRIP="/usr/local/lib/android/sdk/ndk/27.3.13750724/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
           [ -d "$ARROW_LIB_DIR" ] || { echo "FATAL: $ARROW_LIB_DIR missing"; exit 1; }
           [ -x "$LLVM_STRIP" ] || { echo "FATAL: llvm-strip missing: $LLVM_STRIP"; exit 1; }
 
+          # 确保 wheel 工具可用（用于重新生成 RECORD）
+          python3 -m pip install --quiet --upgrade wheel
+
           WORK=/tmp/pyarrow-postprocess
           rm -rf "$WORK"
-          mkdir -p "$WORK"
+          mkdir -p "$WORK/unpacked" "$WORK/out"
           cd "$WORK"
           unzip -q "$WHEEL" -d unpacked
+
           echo "=== unpacked top-level ==="
           ls -la unpacked | head -20
-          echo "=== unpacked/pyarrow/*.so before inject ==="
-          find unpacked/pyarrow -maxdepth 1 -name "*.so" -o -maxdepth 1 -name "*.so.*" | sort || true
+          echo "=== dist-info dir ==="
+          ls -d unpacked/*.dist-info || true
 
-          # 1) 复制 libarrow* / libparquet* 到 unpacked/pyarrow/
+          # 1) 注入 libarrow* / libparquet*
           copied=0
           for f in "$ARROW_LIB_DIR"/libarrow*.so* "$ARROW_LIB_DIR"/libparquet*.so*; do
             [ -e "$f" ] || continue
             base=$(basename "$f")
-            case "$base" in
-              libc++*) continue ;;
-            esac
+            case "$base" in libc++*) continue ;; esac
             cp -f "$f" "unpacked/pyarrow/$base"
             copied=$((copied+1))
             echo "=== injected pyarrow/$base ($(stat -c%s "$f") bytes) ==="
           done
           echo "=== total injected: $copied ==="
 
-          # 2) 遍历 unpacked/pyarrow/*.so（含刚注入的 + 原有的）：
-          #    strip → replace-needed（绝对路径）→ set rpath $ORIGIN
+          # 2) 遍历 pyarrow/ 下所有 .so*：strip → replace-needed → set-rpath $ORIGIN
           echo "=== processing .so files ==="
           processed=0
           while IFS= read -r so; do
             [ -f "$so" ] || continue
             echo "--- $so ---"
-            # strip
-            "$LLVM_STRIP" --strip-unneeded "$so" || echo "WARN: strip failed on $so"
-            # normalize NEEDED
+            "$LLVM_STRIP" --strip-unneeded "$so" 2>/dev/null \
+              && echo "  stripped" \
+              || echo "  WARN: strip failed"
             while IFS= read -r needed; do
               case "$needed" in
                 /*)
                   base=$(basename "$needed")
-                  patchelf --replace-needed "$needed" "$base" "$so" || echo "WARN: replace-needed failed"
-                  echo "  normalized: $needed -> $base"
+                  patchelf --replace-needed "$needed" "$base" "$so" 2>/dev/null \
+                    && echo "  normalized: $needed -> $base" \
+                    || echo "  WARN: replace-needed failed"
                   ;;
               esac
-            done < <(readelf -d "$so" | grep NEEDED | sed -E 's/.*\[(.*)\]/\1/')
-            # set rpath $ORIGIN
-            patchelf --set-rpath '$ORIGIN' "$so" || echo "WARN: set-rpath failed on $so"
+            done < <(readelf -d "$so" 2>/dev/null | grep NEEDED | sed -E 's/.*\[(.*)\]/\1/')
+            patchelf --set-rpath '$ORIGIN' "$so" 2>/dev/null \
+              && echo "  rpath = \$ORIGIN" \
+              || echo "  WARN: set-rpath failed"
             processed=$((processed+1))
-          done < <(find unpacked/pyarrow -maxdepth 1 -type f \( -name "*.so" -o -name "*.so.*" \) | sort)
+          done < <(find unpacked/pyarrow -type f \( -name "*.so" -o -name "*.so.*" \) | sort)
           echo "=== processed $processed .so files ==="
 
-          # 3) 重新打包 wheel（保留原文件名/顺序无关紧要，pyarrow 用 pip 解析 wheel 只认元数据）
-          NEW_WHEEL="$WHEEL"
-          TMP_WHEEL="${WHEEL}.tmp"
-          (cd unpacked && zip -qr "$TMP_WHEEL" .)
-          mv -f "$TMP_WHEEL" "$NEW_WHEEL"
-          echo "=== Wheel after: $(stat -c%s "$NEW_WHEEL") bytes ==="
+          # 3) 用 wheel pack 重打包（自动重算 RECORD）
+          echo "=== repacking with wheel pack (regenerates RECORD) ==="
+          python3 -m wheel pack "$WORK/unpacked" -d "$WORK/out"
+          echo "=== wheel pack output ==="
+          ls -la "$WORK/out"
 
-          # 4) 打印最终 wheel 内容
-          echo ""
-          echo "=== final wheel pyarrow/*.so ==="
-          unzip -l "$NEW_WHEEL" | grep -E "pyarrow/.*\.so" | sort || true
+          NEW=$(find "$WORK/out" -name "*.whl" | head -1)
+          [ -n "$NEW" ] || { echo "FATAL: wheel pack produced nothing"; exit 1; }
+          echo "=== new wheel: $NEW ($(stat -c%s "$NEW") bytes) ==="
 
-          # 5) 校验：抽两个关键 .so 看 NEEDED / RUNPATH
+          # 4) 用新 wheel 覆盖原 wheel
+          cp -f "$NEW" "$WHEEL"
+          echo "=== replaced original wheel ($(stat -c%s "$WHEEL") bytes) ==="
+
+          # 5) 校验 1：最终 wheel 里的 .so 列表
           echo ""
-          echo "=== verify _compute.so NEEDED/RUNPATH ==="
+          echo "=== verify 1: final wheel pyarrow/*.so ==="
+          unzip -l "$WHEEL" | grep -E "pyarrow/.*\.so" | sort || true
+
+          # 6) 校验 2：RECORD 重算了没
+          echo ""
+          echo "=== verify 2: RECORD line count ==="
+          DIST_INFO_DIR=$(unzip -l "$WHEEL" | grep -oE "[^/]+\.dist-info" | head -1)
+          echo "  dist-info dir: $DIST_INFO_DIR"
+          unzip -p "$WHEEL" "$DIST_INFO_DIR/RECORD" | wc -l
+          echo "  (total RECORD lines)"
+          echo "  last 5 RECORD entries:"
+          unzip -p "$WHEEL" "$DIST_INFO_DIR/RECORD" | tail -5
+
+          # 7) 校验 3：_compute.so / _parquet.so / lib.so / libarrow.so NEEDED/RUNPATH
+          echo ""
+          echo "=== verify 3: NEEDED/RUNPATH ==="
           rm -rf /tmp/pyarrow-verify
           mkdir -p /tmp/pyarrow-verify
-          unzip -q -o "$NEW_WHEEL" -d /tmp/pyarrow-verify
-          for f in pyarrow/_compute.so pyarrow/_parquet.so pyarrow/lib.so; do
+          unzip -q -o "$WHEEL" -d /tmp/pyarrow-verify
+          for f in pyarrow/_compute.so pyarrow/_parquet.so pyarrow/lib.so pyarrow/libarrow.so; do
             if [ -f "/tmp/pyarrow-verify/$f" ]; then
               echo "--- $f ---"
-              readelf -d "/tmp/pyarrow-verify/$f" | grep -E "NEEDED|RUNPATH|RPATH" || true
+              readelf -d "/tmp/pyarrow-verify/$f" 2>/dev/null | grep -E "NEEDED|RUNPATH|RPATH" || echo "  (none)"
             fi
           done
 
