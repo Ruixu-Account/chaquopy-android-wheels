@@ -23,6 +23,15 @@ jobs:
         run: |
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;${NDK_VERSION}" || true
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${NDK_VERSION}" >> $GITHUB_ENV
+          echo "$ANDROID_HOME/ndk/${NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
+
+      - name: Verify NDK toolchain
+        run: |
+          set -euo pipefail
+          NDK_BIN="$ANDROID_HOME/ndk/${NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          ls -la "$NDK_BIN/aarch64-linux-android${ANDROID_API}-clang" || { echo "FATAL: clang not found"; exit 1; }
+          "$NDK_BIN/aarch64-linux-android${ANDROID_API}-clang" --version | head -1
+          which aarch64-linux-android${ANDROID_API}-clang || echo "WARN: not in PATH"
 
       - name: Download OpenSSL source
         run: |
@@ -30,22 +39,22 @@ jobs:
           wget -q "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz" -O /tmp/openssl.tar.gz
           ls -la /tmp/openssl.tar.gz
           tar -xzf /tmp/openssl.tar.gz -C /tmp
-          mv /tmp/openssl-${OPENSSL_VERSION} /tmp/openssl-src
+          mv "/tmp/openssl-${OPENSSL_VERSION}" /tmp/openssl-src
           ls /tmp/openssl-src | head
 
       - name: Configure OpenSSL for aarch64 Android
         run: |
           set -euo pipefail
           NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          export PATH="$NDK_BIN:$PATH"
-          export CC="aarch64-linux-android${ANDROID_API}-clang"
-          export CXX="aarch64-linux-android${ANDROID_API}-clang++"
-          export AR="llvm-ar"
-          export RANLIB="llvm-ranlib"
+
+          # 绝对路径 CC/CXX/AR/RANLIB，Makefile 里写死，不依赖 PATH
+          export CC="$NDK_BIN/aarch64-linux-android${ANDROID_API}-clang"
+          export CXX="$NDK_BIN/aarch64-linux-android${ANDROID_API}-clang++"
+          export AR="$NDK_BIN/llvm-ar"
+          export RANLIB="$NDK_BIN/llvm-ranlib"
           export ANDROID_NDK_ROOT="$ANDROID_NDK_HOME"
 
           cd /tmp/openssl-src
-          # android-arm64 是 OpenSSL 自带的 target
           ./Configure android-arm64 \
             -D__ANDROID_API__=${ANDROID_API} \
             --prefix=/tmp/openssl-install \
@@ -56,14 +65,19 @@ jobs:
             no-dso \
             no-ui-console \
             2>&1 | tee /tmp/openssl-config.log
+          echo ""
           echo "=== config summary ==="
           grep -E "^(Configuring|CC|CXX|AR)" /tmp/openssl-config.log | head -20
+          echo ""
+          echo "=== verify Makefile CC line ==="
+          grep -m 3 "^CC=" Makefile || true
 
       - name: Build OpenSSL
         run: |
           set -euo pipefail
           cd /tmp/openssl-src
-          make -j4 2>&1 | tail -40
+          make -j4 2>&1 | tail -60
+          echo ""
           echo "=== build done ==="
 
       - name: Install OpenSSL
@@ -71,7 +85,8 @@ jobs:
           set -euo pipefail
           cd /tmp/openssl-src
           make install_sw 2>&1 | tail -20
-          echo "=== installed ==="
+          echo ""
+          echo "=== installed tree ==="
           find /tmp/openssl-install -type f | head -30
           echo ""
           echo "=== key files ==="
@@ -86,15 +101,16 @@ jobs:
             file "$f"
           done
           echo ""
-          echo "=== sample symbol from libcrypto.a ==="
-          llvm-ar t /tmp/openssl-install/lib/libcrypto.a 2>/dev/null | head -5 || ar t /tmp/openssl-install/lib/libcrypto.a | head -5
+          echo "=== sample member from libcrypto.a ==="
+          llvm-ar t /tmp/openssl-install/lib/libcrypto.a 2>/dev/null | head -5 || \
+            ar t /tmp/openssl-install/lib/libcrypto.a | head -5
 
       - name: Setup Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-          $HOME/.cargo/bin/rustup target add aarch64-linux-android
-          $HOME/.cargo/bin/rustc --version
+          "$HOME/.cargo/bin/rustup" target add aarch64-linux-android
+          "$HOME/.cargo/bin/rustc" --version
 
       - name: Write minimal Rust test
         run: |
@@ -118,30 +134,35 @@ jobs:
               unsafe { openssl_sys::OpenSSL_version_num() as u64 }
           }
           EOF
-          ls -la
+          echo "=== Cargo.toml ==="
+          cat Cargo.toml
+          echo ""
+          echo "=== src/lib.rs ==="
+          cat src/lib.rs
 
       - name: Build Rust test against Android OpenSSL
         run: |
           set -euo pipefail
           NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          export PATH="$NDK_BIN:$HOME/.cargo/bin:$PATH"
-          export CC_aarch64_linux_android="aarch64-linux-android${ANDROID_API}-clang"
-          export CXX_aarch64_linux_android="aarch64-linux-android${ANDROID_API}-clang++"
-          export AR_aarch64_linux_android="llvm-ar"
-          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="aarch64-linux-android${ANDROID_API}-clang"
+
+          export CC_aarch64_linux_android="$NDK_BIN/aarch64-linux-android${ANDROID_API}-clang"
+          export CXX_aarch64_linux_android="$NDK_BIN/aarch64-linux-android${ANDROID_API}-clang++"
+          export AR_aarch64_linux_android="$NDK_BIN/llvm-ar"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK_BIN/aarch64-linux-android${ANDROID_API}-clang"
+
           export OPENSSL_DIR=/tmp/openssl-install
           export OPENSSL_STATIC=1
           export OPENSSL_LIB_DIR=/tmp/openssl-install/lib
           export OPENSSL_INCLUDE_DIR=/tmp/openssl-install/include
 
           cd /tmp/ossl-test
-          cargo build --release --target aarch64-linux-android 2>&1 | tee /tmp/cargo-build.log
+          "$HOME/.cargo/bin/cargo" build --release --target aarch64-linux-android 2>&1 | tee /tmp/cargo-build.log
           echo ""
           echo "=== build result ==="
           find target/aarch64-linux-android/release -name "*.so" -exec ls -la {} \;
           find target/aarch64-linux-android/release -name "*.so" -exec file {} \;
 
-      - name: Upload log on failure
+      - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
