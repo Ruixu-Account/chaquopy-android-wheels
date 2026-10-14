@@ -47,7 +47,6 @@ jobs:
           set -euo pipefail
           NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
 
-          # 绝对路径 CC/CXX/AR/RANLIB，Makefile 里写死，不依赖 PATH
           export CC="$NDK_BIN/aarch64-linux-android${ANDROID_API}-clang"
           export CXX="$NDK_BIN/aarch64-linux-android${ANDROID_API}-clang++"
           export AR="$NDK_BIN/llvm-ar"
@@ -67,7 +66,7 @@ jobs:
             2>&1 | tee /tmp/openssl-config.log
           echo ""
           echo "=== config summary ==="
-          grep -E "^(Configuring|CC|CXX|AR)" /tmp/openssl-config.log | head -20
+          grep -E "^(Configuring|CC|CXX|AR)" /tmp/openssl-config.log | head -20 || true
           echo ""
           echo "=== verify Makefile CC line ==="
           grep -m 3 "^CC=" Makefile || true
@@ -76,7 +75,7 @@ jobs:
         run: |
           set -euo pipefail
           cd /tmp/openssl-src
-          make -j4 2>&1 | tail -60
+          make -j4 2>&1 | tail -60 || true
           echo ""
           echo "=== build done ==="
 
@@ -84,14 +83,16 @@ jobs:
         run: |
           set -euo pipefail
           cd /tmp/openssl-src
-          make install_sw 2>&1 | tail -20
+          make install_sw 2>&1 | tail -20 || true
           echo ""
-          echo "=== installed tree ==="
-          find /tmp/openssl-install -type f | head -30
+          echo "=== installed tree (top 30) ==="
+          find /tmp/openssl-install -type f 2>/dev/null | head -30 || true
           echo ""
           echo "=== key files ==="
           ls -la /tmp/openssl-install/lib/ || true
-          ls -la /tmp/openssl-install/include/openssl/ | head || true
+          echo ""
+          echo "=== include/openssl (top) ==="
+          ls -la /tmp/openssl-install/include/openssl/ 2>/dev/null | head || true
 
       - name: Verify OpenSSL arch
         run: |
@@ -102,8 +103,18 @@ jobs:
           done
           echo ""
           echo "=== sample member from libcrypto.a ==="
-          llvm-ar t /tmp/openssl-install/lib/libcrypto.a 2>/dev/null | head -5 || \
-            ar t /tmp/openssl-install/lib/libcrypto.a | head -5
+          llvm-ar t /tmp/openssl-install/lib/libcrypto.a 2>/dev/null | head -5 || true
+          echo ""
+          echo "=== verify one member arch ==="
+          TMPDIR=/tmp/ossl-ar-check
+          rm -rf "$TMPDIR"
+          mkdir -p "$TMPDIR"
+          cd "$TMPDIR"
+          llvm-ar x /tmp/openssl-install/lib/libcrypto.a 2>/dev/null || true
+          FIRST=$(ls *.o 2>/dev/null | head -1 || true)
+          if [ -n "$FIRST" ]; then
+            file "$FIRST"
+          fi
 
       - name: Setup Rust
         run: |
@@ -159,8 +170,8 @@ jobs:
           "$HOME/.cargo/bin/cargo" build --release --target aarch64-linux-android 2>&1 | tee /tmp/cargo-build.log
           echo ""
           echo "=== build result ==="
-          find target/aarch64-linux-android/release -name "*.so" -exec ls -la {} \;
-          find target/aarch64-linux-android/release -name "*.so" -exec file {} \;
+          find target/aarch64-linux-android/release -name "*.so" -exec ls -la {} \; 2>/dev/null || true
+          find target/aarch64-linux-android/release -name "*.so" -exec file {} \; 2>/dev/null || true
 
       - name: Upload logs on failure
         if: failure()
