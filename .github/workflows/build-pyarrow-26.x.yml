@@ -644,7 +644,7 @@ jobs:
             number: 0
           requirements:
             build:
-              - cmake >=3.25
+              - cmake 3.31.0
               - ninja 1.11.1
               - scikit-build-core 1.1.1
               - numpy 2.5.3
