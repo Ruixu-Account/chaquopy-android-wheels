@@ -5,3 +5,8 @@ compatibility_date = "2025-01-01"
 routes = [
   { pattern = "wheel.ruixu.cc.cd/*", zone_name = "ruixu.cc.cd" }
 ]
+
+# 新增静态资源绑定
+[assets]
+directory = "./public"  # 假设你的 HTML 会生成在这个目录下
+binding = "ASSETS"
