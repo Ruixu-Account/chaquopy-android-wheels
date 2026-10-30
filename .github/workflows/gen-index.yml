@@ -1,12 +1,10 @@
-name: Auto Generate PyPI Index
+name: Generate PyPI Index
 
 on:
-  release:
-    types: [published] # 每次发布 Release 时触发
-  workflow_dispatch:   # 允许你在 Actions 页面手动点按钮触发
+  workflow_dispatch: # 仅保留手动触发按钮
 
 permissions:
-  contents: write      # 必须给写权限，因为要把生成的 HTML push 回仓库
+  contents: write
 
 jobs:
   build-and-push:
@@ -14,17 +12,17 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Fetch Latest Release Assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 获取最新 Release 的 Assets 列表并保存为 JSON
           gh release view --json assets > release_assets.json
 
       - name: Generate PEP 503 HTML
         run: |
-          # 创建目标目录
           mkdir -p worker/public/simple
           
           python - <<EOF
@@ -40,17 +38,14 @@ jobs:
                   pkg_name = name.split('-')[0].lower().replace('_', '-')
                   if pkg_name not in packages:
                       packages[pkg_name] = []
-                  # 相对路径，对应 Worker 代理的根目录
                   packages[pkg_name].append(f'<a href="/{name}">{name}</a><br/>')
 
-          # 1. 生成单个包的页面
           for pkg, links in packages.items():
               pkg_dir = f'worker/public/simple/{pkg}'
               os.makedirs(pkg_dir, exist_ok=True)
               with open(f'{pkg_dir}/index.html', 'w') as f:
                   f.write(f'<!DOCTYPE html><html><body>\n' + '\n'.join(links) + '\n</body></html>')
 
-          # 2. 生成根目录索引
           with open('worker/public/simple/index.html', 'w') as f:
               f.write('<!DOCTYPE html><html><body>\n')
               for pkg in sorted(packages.keys()):
@@ -63,5 +58,6 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add worker/public/
-          # 如果没有变化就不提交
-          git diff --quiet && git diff --staged --quiet || (git commit -m "chore: auto-generate PyPI index [skip ci]" && git push)
+          git commit -m "chore: auto-generate PyPI index" || echo "No changes to commit"
+          git pull --rebase origin main
+          git push origin main
