@@ -5,9 +5,8 @@ export default {
 
     // 1. 处理 .whl 文件的下载代理
     if (path.endsWith(".whl")) {
-      const filename = path.slice(1); // 去掉开头的 /
+      const filename = path.slice(1);
       
-      // 安全校验
       if (filename.includes("/") || filename.includes("..")) {
         return new Response("Invalid path", { status: 400 });
       }
@@ -32,21 +31,16 @@ export default {
       headers.set("Access-Control-Allow-Origin", "*");
       headers.set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
 
-      return new Response(resp.body, {
-        status: resp.status,
-        headers,
-      });
+      return new Response(resp.body, { status: resp.status, headers });
     }
 
-    // 2. 解决 PEP 503 痛点：如果访问 /simple 或 /simple/numpy 没带末尾斜杠，自动 308 重定向补全
-    // 否则 env.ASSETS 可能会找不到目录下的 index.html
+    // 2. 补全 /simple 结尾的斜杠，防止 ASSETS 解析失败
     if (path.startsWith("/simple") && !path.endsWith("/")) {
       url.pathname = path + "/";
       return Response.redirect(url.toString(), 308);
     }
 
-    // 3. 其他所有请求（比如 /simple/ 或 /simple/numpy/）全部扔给静态资源处理！
-    // Cloudflare 底层会自动去 public 目录里找对应的 index.html 返回
+    // 3. 其他请求交给静态资源处理
     return env.ASSETS.fetch(request);
   },
 };
