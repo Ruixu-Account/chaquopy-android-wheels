@@ -284,7 +284,7 @@ jobs:
                 shift ;;
             esac
           done
-          exec "${NDK_BIN}/clang" --target=${CLANG_TARGET} -Wl,-z,max-page-size=16384 "\${ARGS[@]}""
+          exec "${NDK_BIN}/clang" --target=${CLANG_TARGET} -Wl,-z,max-page-size=16384 "\${ARGS[@]}"
           EOF
           chmod +x "$WRAP/ld"
 
