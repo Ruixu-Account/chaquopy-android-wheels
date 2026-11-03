@@ -397,6 +397,13 @@ jobs:
             sed -i 's/-Werror=vla/-Wno-error=vla/g' "$LF_MAKEFILE"
           fi
 
+          LIBTOOL_FILE="$BUILD_DIR/aarch64-linux-android/libgfortran/libtool"
+          if [ -f "$LIBTOOL_FILE" ]; then
+            echo "强行开启 libtool 的 .so 生成开关..."
+            sed -i 's/can_build_shared=no/can_build_shared=yes/g' "$LIBTOOL_FILE"
+            sed -i 's/build_libtool_libs=no/build_libtool_libs=yes/g' "$LIBTOOL_FILE"
+          fi
+          
           # 关键：CFLAGS_FOR_TARGET 里同时带 -fPIC 和 -Wno-error
           # 后者会覆盖 Makefile 里硬编码的 -Werror=
           make -j"$(nproc)" all-target-libgfortran \
@@ -404,6 +411,17 @@ jobs:
             LDFLAGS_FOR_TARGET="-Wl,-z,max-page-size=16384 -Wl,-z,tls-align=16384" \
             2>&1 | tee /tmp/gcc-build-libgfortran.log
 
+          LF_A="$BUILD_DIR/aarch64-linux-android/libgfortran/.libs/libgfortran.a"
+          LF_SO="$BUILD_DIR/aarch64-linux-android/libgfortran/.libs/libgfortran.so.5"
+          if [ -f "$LF_A" ] && [ ! -f "$LF_SO" ]; then
+            echo "libtool 依然没生成 .so，直接使用 clang 强行手搓 libgfortran.so.5..."
+            "$NDK_BIN/clang" --target=aarch64-linux-android24 -shared -fPIC \
+              -Wl,-soname,libgfortran.so.5 \
+              -Wl,-z,max-page-size=16384 -Wl,-z,tls-align=16384 \
+              -Wl,--whole-archive "$LF_A" -Wl,--no-whole-archive \
+              -lm -o "$LF_SO"
+          fi
+          
       - name: Install GCC
         if: success()
         run: |
