@@ -28,6 +28,9 @@ env:
   CHAQUOPY_ROOT: /opt/chaquopy
   NDK_VERSION: "27.3.13750724"
   ANDROID_API_LEVEL: "24"
+  # ⬇️ 加上这两行，强行注入 16KB 对齐
+  CFLAGS: "-Wl,-z,max-page-size=16384"
+  LDFLAGS: "-Wl,-z,max-page-size=16384"
 
 jobs:
   build:
