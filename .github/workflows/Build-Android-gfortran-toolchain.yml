@@ -411,6 +411,8 @@ jobs:
             LDFLAGS_FOR_TARGET="-Wl,-z,max-page-size=16384 -Wl,-z,tls-align=16384" \
             2>&1 | tee /tmp/gcc-build-libgfortran.log
 
+          NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+       
           LF_A="$BUILD_DIR/aarch64-linux-android/libgfortran/.libs/libgfortran.a"
           LF_SO="$BUILD_DIR/aarch64-linux-android/libgfortran/.libs/libgfortran.so.5"
           if [ -f "$LF_A" ] && [ ! -f "$LF_SO" ]; then
