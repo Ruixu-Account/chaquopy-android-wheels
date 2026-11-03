@@ -448,7 +448,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: gfortran-android-arm64-gcc${{ env.GCC_VERSION }}
-          path: /tmp/gfortran-arm64.tar.gz
+          path: /tmp/gfortran-arm64-shared.tar.gz
           retention-days: 90
 
       - name: Upload to GitHub Release
@@ -460,7 +460,7 @@ jobs:
           body: |
             Cross gfortran toolchain for Android `aarch64-linux-android`, API ${{ env.API_LEVEL }}.
             Built from GCC ${{ env.GCC_VERSION }} + NDK r27c (${{ env.NDK_VERSION }}).
-          files: /tmp/gfortran-arm64.tar.gz
+          files: /tmp/gfortran-arm64-shared.tar.gz
           make_latest: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
