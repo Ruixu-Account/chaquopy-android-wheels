@@ -440,8 +440,8 @@ jobs:
         if: success()
         run: |
           cd "$PREFIX"
-          tar -czf /tmp/gfortran-arm64.tar.gz .
-          ls -la /tmp/gfortran-arm64.tar.gz
+          tar -czf /tmp/gfortran-arm64-shared.tar.gz .
+          ls -la /tmp/gfortran-arm64-shared.tar.gz
 
       - name: Upload artifact
         if: success()
