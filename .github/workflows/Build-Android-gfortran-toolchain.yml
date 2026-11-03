@@ -318,10 +318,10 @@ jobs:
             --enable-languages=fortran \
             --disable-bootstrap \
             --disable-multilib \
-            --disable-shared \
+            --enable-shared \
             --disable-threads \
             --disable-libssp \
-            --disable-libquadmath \
+            --enable-libquadmath \
             --disable-libgomp \
             --disable-libatomic \
             --disable-libsanitizer \
