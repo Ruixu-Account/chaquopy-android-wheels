@@ -279,6 +279,9 @@ jobs:
                 shift ;;
               -lpthread|-lrt|-ldl)
                 shift ;;
+              --soname=*|--version-script=*)
+                ARGS+=("-Wl,\$1")
+                shift ;;
               *)
                 ARGS+=("\$1")
                 shift ;;
