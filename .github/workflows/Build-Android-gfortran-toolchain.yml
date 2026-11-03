@@ -212,7 +212,7 @@ jobs:
             exit 0
           fi
           cd "$SRC_DIR"
-          URL="https://mirrors.tuna.tsinghua.edu.cn/gnu/gcc/gcc-${GCC_VERSION}/gcc-${GCC_VERSION}.tar.xz"
+          URL="https://ftp.gnu.org/gnu/gcc/gcc-${GCC_VERSION}/gcc-${GCC_VERSION}.tar.xz"
           wget -q --tries=3 --timeout=300 "$URL" -O gcc.tar.xz
           tar -xf gcc.tar.xz
           rm -f gcc.tar.xz
