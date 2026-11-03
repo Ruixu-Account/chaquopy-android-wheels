@@ -287,7 +287,7 @@ jobs:
                 shift ;;
             esac
           done
-          exec "${NDK_BIN}/clang" --target=${CLANG_TARGET} -Wl,-z,max-page-size=16384 "\${ARGS[@]}"
+          exec "${NDK_BIN}/clang" --target=${CLANG_TARGET} -Wl,-z,max-page-size=16384 -Wl,-z,tls-align=16384 "\${ARGS[@]}"
           EOF
           chmod +x "$WRAP/ld"
 
@@ -378,6 +378,7 @@ jobs:
 
           make -j"$(nproc)" all-target-libgcc \
             CFLAGS_FOR_TARGET="-g -O2 -fPIC -Wno-error=implicit-function-declaration -Wno-error=vla -include $PREDEF_HEADER" \
+            LDFLAGS_FOR_TARGET="-Wl,-z,max-page-size=16384 -Wl,-z,tls-align=16384" \
             2>&1 | tee /tmp/gcc-build-libgcc.log
 
       # ============================================================
@@ -400,7 +401,7 @@ jobs:
           # 后者会覆盖 Makefile 里硬编码的 -Werror=
           make -j"$(nproc)" all-target-libgfortran \
             CFLAGS_FOR_TARGET="-g -O2 -fPIC -Wno-error=implicit-function-declaration -Wno-error=vla -include $PREDEF_HEADER" \
-            LDFLAGS_FOR_TARGET="-Wl,-z,max-page-size=16384" \
+            LDFLAGS_FOR_TARGET="-Wl,-z,max-page-size=16384 -Wl,-z,tls-align=16384" \
             2>&1 | tee /tmp/gcc-build-libgfortran.log
 
       - name: Install GCC
