@@ -476,12 +476,14 @@ jobs:
           
           if [ -f "$LF_SO" ]; then
             cp -f "$LF_SO" "$PREFIX_LIB/"
+            "$NDK_BIN/llvm-strip" --strip-unneeded "$PREFIX_LIB/libgfortran.so.5"
             ln -sf "libgfortran.so.5" "$PREFIX_LIB/libgfortran.so"
             echo "✅ 强行装入了 libgfortran.so.5"
           fi
           
           if [ -f "$LQ_SO" ]; then
             cp -f "$LQ_SO" "$PREFIX_LIB/"
+            "$NDK_BIN/llvm-strip" --strip-unneeded "$PREFIX_LIB/libquadmath.so.0"
             ln -sf "libquadmath.so.0" "$PREFIX_LIB/libquadmath.so"
             echo "✅ 强行装入了 libquadmath.so.0"
           fi
