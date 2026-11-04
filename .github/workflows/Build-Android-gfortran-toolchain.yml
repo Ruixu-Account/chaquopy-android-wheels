@@ -315,7 +315,6 @@ jobs:
           
           pin = "/* Force TLS alignment for Android Bionic */\nstatic __thread __attribute__((aligned(64), used, retain)) volatile char gfortran_tls_aligner[64];\n"
           
-          # 注入 libgfortran
           p1 = pathlib.Path('libgfortran/libgfortran.h')
           if p1.exists():
               s = p1.read_text()
@@ -324,7 +323,6 @@ jobs:
                   p1.write_text(s)
                   print("✅ Injected to libgfortran.h")
           
-          # 注入 libquadmath
           p2 = pathlib.Path('libquadmath/quadmath.h')
           if p2.exists():
               s = p2.read_text()
@@ -411,7 +409,7 @@ jobs:
             CFLAGS_FOR_TARGET="-g -O2 -fPIC -Wno-error=implicit-function-declaration -Wno-error=vla -include $PREDEF_HEADER" \
             2>&1 | tee /tmp/gcc-build-libgcc.log
 
-      - name: Build target-libgfortran
+      - name: Build target-libgfortran and libquadmath
         if: success()
         run: |
           set -euo pipefail
@@ -430,7 +428,8 @@ jobs:
             sed -i 's/build_libtool_libs=no/build_libtool_libs=yes/g' "$LIBTOOL_FILE"
           fi
           
-          make -j"$(nproc)" all-target-libgfortran \
+          # 同时编译 libgfortran 和 libquadmath
+          make -j"$(nproc)" all-target-libgfortran all-target-libquadmath \
             CFLAGS_FOR_TARGET="-g -O2 -fPIC -Wno-error=implicit-function-declaration -Wno-error=vla -include $PREDEF_HEADER" \
             2>&1 | tee /tmp/gcc-build-libgfortran.log
 
@@ -446,14 +445,47 @@ jobs:
               -Wl,--whole-archive "$LF_A" -Wl,--no-whole-archive \
               -lm -o "$LF_SO"
           fi
+
+          LQ_A="$BUILD_DIR/aarch64-linux-android/libquadmath/.libs/libquadmath.a"
+          LQ_SO="$BUILD_DIR/aarch64-linux-android/libquadmath/.libs/libquadmath.so.0"
+          if [ -f "$LQ_A" ] && [ ! -f "$LQ_SO" ]; then
+            echo "libtool 依然没生成 libquadmath.so.0，直接使用 clang 强行手搓..."
+            "$NDK_BIN/clang" --target=aarch64-linux-android24 -shared -fPIC \
+              -Wl,-soname,libquadmath.so.0 \
+              -Wl,-z,max-page-size=16384 \
+              -Wl,--whole-archive "$LQ_A" -Wl,--no-whole-archive \
+              -lm -o "$LQ_SO"
+          fi
           
       - name: Install GCC
         if: success()
         run: |
           set -euo pipefail
           cd "$BUILD_DIR"
-          make install-gcc install-target-libgcc install-target-libgfortran \
+          # 安装 gcc, libgcc, libgfortran, libquadmath
+          make install-gcc install-target-libgcc install-target-libgfortran install-target-libquadmath \
             2>&1 | tee /tmp/gcc-install.log
+          
+          # 强行把刚才手搓的 .so 复制到安装目录
+          NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          PREFIX_LIB="$PREFIX/aarch64-linux-android/lib64"
+          mkdir -p "$PREFIX_LIB"
+          
+          LF_SO="$BUILD_DIR/aarch64-linux-android/libgfortran/.libs/libgfortran.so.5"
+          LQ_SO="$BUILD_DIR/aarch64-linux-android/libquadmath/.libs/libquadmath.so.0"
+          
+          if [ -f "$LF_SO" ]; then
+            cp -f "$LF_SO" "$PREFIX_LIB/"
+            ln -sf "libgfortran.so.5" "$PREFIX_LIB/libgfortran.so"
+            echo "✅ 强行装入了 libgfortran.so.5"
+          fi
+          
+          if [ -f "$LQ_SO" ]; then
+            cp -f "$LQ_SO" "$PREFIX_LIB/"
+            ln -sf "libquadmath.so.0" "$PREFIX_LIB/libquadmath.so"
+            echo "✅ 强行装入了 libquadmath.so.0"
+          fi
+          
           ls -la "$PREFIX/bin/"
 
       - name: Verify gfortran
@@ -476,23 +508,6 @@ jobs:
             || { echo "::error::输出架构不是 aarch64"; exit 1; }
           echo "✅ 输出架构是 aarch64"
 
-      - name: Cleanup before pack
-        if: success()
-        run: |
-          rm -rf "$SRC_DIR" "$BUILD_DIR"
-          rm -rf "$ANDROID_NDK_HOME" || true
-          du -sh "$PREFIX"
-
-      - name: Pack toolchain
-        if: success()
-        run: |
-          cd "$PREFIX"
-          tar -czf /tmp/gfortran-arm64-shared.tar.gz .
-          ls -la /tmp/gfortran-arm64-shared.tar.gz
-
-      # ============================================================
-      # 👇 插在这里：开箱验货，看看到底是 .a 还是 .so 👇
-      # ============================================================
       - name: Verify the output toolchain (Static vs Shared)
         if: success()
         run: |
@@ -517,7 +532,20 @@ jobs:
           else
             echo "❌ 完蛋，里面只有静态库 (.a)，libtool 依然没有生成 .so！"
           fi
-      # ============================================================
+
+      - name: Cleanup before pack
+        if: success()
+        run: |
+          rm -rf "$SRC_DIR" "$BUILD_DIR"
+          rm -rf "$ANDROID_NDK_HOME" || true
+          du -sh "$PREFIX"
+
+      - name: Pack toolchain
+        if: success()
+        run: |
+          cd "$PREFIX"
+          tar -czf /tmp/gfortran-arm64-shared.tar.gz .
+          ls -la /tmp/gfortran-arm64-shared.tar.gz
 
       - name: Upload artifact
         if: success()
