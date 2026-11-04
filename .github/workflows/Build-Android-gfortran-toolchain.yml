@@ -490,6 +490,35 @@ jobs:
           tar -czf /tmp/gfortran-arm64-shared.tar.gz .
           ls -la /tmp/gfortran-arm64-shared.tar.gz
 
+      # ============================================================
+      # 👇 插在这里：开箱验货，看看到底是 .a 还是 .so 👇
+      # ============================================================
+      - name: Verify the output toolchain (Static vs Shared)
+        if: success()
+        run: |
+          set -euo pipefail
+          echo "=== 📦 验货阶段：查看产物是 .a 还是 .so ==="
+          find "$PREFIX" -name "libgfortran*" -o -name "libquadmath*" | xargs ls -lh
+
+          echo "=== 🩻 查看这些文件的真实身份 (file 命令) ==="
+          find "$PREFIX" -name "libgfortran*" -o -name "libquadmath*" | xargs file
+
+          echo "=== 🎯 验尸报告：动态库的 TLS 对齐情况 ==="
+          NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          
+          SO_FILES=$(find "$PREFIX" -name "*.so*" || true)
+
+          if [ -n "$SO_FILES" ]; then
+            for f in $SO_FILES; do
+              echo "--- $f ---"
+              "$NDK_BIN/llvm-readelf" -l "$f" | grep TLS || echo "⚠️ 没有找到 TLS 段"
+            done
+            echo "✅ 成功找到了动态库 (.so)！"
+          else
+            echo "❌ 完蛋，里面只有静态库 (.a)，libtool 依然没有生成 .so！"
+          fi
+      # ============================================================
+
       - name: Upload artifact
         if: success()
         uses: actions/upload-artifact@v4
