@@ -287,7 +287,7 @@ jobs:
                 shift ;;
             esac
           done
-          exec "${NDK_BIN}/clang" --target=${CLANG_TARGET} -Wl,-z,max-page-size=16384 -Wl,-z,tls-align=16384 "\${ARGS[@]}"
+          exec "${NDK_BIN}/clang" --target=${CLANG_TARGET} -Wl,-z,max-page-size=16384 "\${ARGS[@]}"
           EOF
           chmod +x "$WRAP/ld"
 
@@ -304,6 +304,37 @@ jobs:
           ln -sf "${NDK_BIN}/llvm-objcopy" "$TARGET_BIN/${TARGET}-objcopy"
 
           echo "$TARGET_BIN" >> $GITHUB_PATH
+
+      - name: Inject TLS Alignment to GCC runtime libs
+        run: |
+          set -euo pipefail
+          cd "$SRC_DIR/gcc-${GCC_VERSION}"
+          
+          cat > /tmp/inject_tls.py << 'PYEOF'
+          import pathlib
+          
+          pin = "/* Force TLS alignment for Android Bionic */\nstatic __thread __attribute__((aligned(64), used, retain)) volatile char ngx_tls_aligner[64];\n"
+          
+          # 注入 libgfortran
+          p1 = pathlib.Path('libgfortran/libgfortran.h')
+          if p1.exists():
+              s = p1.read_text()
+              if 'ngx_tls_aligner' not in s:
+                  s = s.replace('#ifndef LIBGFORTRAN_H', '#ifndef LIBGFORTRAN_H\n' + pin)
+                  p1.write_text(s)
+                  print("✅ Injected to libgfortran.h")
+          
+          # 注入 libquadmath
+          p2 = pathlib.Path('libquadmath/quadmath.h')
+          if p2.exists():
+              s = p2.read_text()
+              if 'ngx_tls_aligner' not in s:
+                  s = s.replace('#ifndef QUADMATH_H', '#ifndef QUADMATH_H\n' + pin)
+                  p2.write_text(s)
+                  print("✅ Injected to quadmath.h")
+          PYEOF
+          
+          python3 /tmp/inject_tls.py
 
       - name: Configure GCC
         run: |
@@ -378,19 +409,14 @@ jobs:
 
           make -j"$(nproc)" all-target-libgcc \
             CFLAGS_FOR_TARGET="-g -O2 -fPIC -Wno-error=implicit-function-declaration -Wno-error=vla -include $PREDEF_HEADER" \
-            LDFLAGS_FOR_TARGET="-Wl,-z,max-page-size=16384 -Wl,-z,tls-align=16384" \
             2>&1 | tee /tmp/gcc-build-libgcc.log
 
-      # ============================================================
-      # libgfortran：-fPIC + -Wno-error=... 都要给
-      # ============================================================
       - name: Build target-libgfortran
         if: success()
         run: |
           set -euo pipefail
           cd "$BUILD_DIR"
 
-          # 二次保险：Makefile 如果已经生成，直接 sed
           LF_MAKEFILE="$BUILD_DIR/aarch64-linux-android/libgfortran/Makefile"
           if [ -f "$LF_MAKEFILE" ]; then
             sed -i 's/-Werror=implicit-function-declaration/-Wno-error=implicit-function-declaration/g' "$LF_MAKEFILE"
@@ -404,11 +430,8 @@ jobs:
             sed -i 's/build_libtool_libs=no/build_libtool_libs=yes/g' "$LIBTOOL_FILE"
           fi
           
-          # 关键：CFLAGS_FOR_TARGET 里同时带 -fPIC 和 -Wno-error
-          # 后者会覆盖 Makefile 里硬编码的 -Werror=
           make -j"$(nproc)" all-target-libgfortran \
             CFLAGS_FOR_TARGET="-g -O2 -fPIC -Wno-error=implicit-function-declaration -Wno-error=vla -include $PREDEF_HEADER" \
-            LDFLAGS_FOR_TARGET="-Wl,-z,max-page-size=16384 -Wl,-z,tls-align=16384" \
             2>&1 | tee /tmp/gcc-build-libgfortran.log
 
           NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
@@ -419,7 +442,7 @@ jobs:
             echo "libtool 依然没生成 .so，直接使用 clang 强行手搓 libgfortran.so.5..."
             "$NDK_BIN/clang" --target=aarch64-linux-android24 -shared -fPIC \
               -Wl,-soname,libgfortran.so.5 \
-              -Wl,-z,max-page-size=16384 -Wl,-z,tls-align=16384 \
+              -Wl,-z,max-page-size=16384 \
               -Wl,--whole-archive "$LF_A" -Wl,--no-whole-archive \
               -lm -o "$LF_SO"
           fi
