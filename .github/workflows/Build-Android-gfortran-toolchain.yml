@@ -313,13 +313,13 @@ jobs:
           cat > /tmp/inject_tls.py << 'PYEOF'
           import pathlib
           
-          pin = "/* Force TLS alignment for Android Bionic */\nstatic __thread __attribute__((aligned(64), used, retain)) volatile char ngx_tls_aligner[64];\n"
+          pin = "/* Force TLS alignment for Android Bionic */\nstatic __thread __attribute__((aligned(64), used, retain)) volatile char gfortran_tls_aligner[64];\n"
           
           # 注入 libgfortran
           p1 = pathlib.Path('libgfortran/libgfortran.h')
           if p1.exists():
               s = p1.read_text()
-              if 'ngx_tls_aligner' not in s:
+              if 'gfortran_tls_aligner' not in s:
                   s = s.replace('#ifndef LIBGFORTRAN_H', '#ifndef LIBGFORTRAN_H\n' + pin)
                   p1.write_text(s)
                   print("✅ Injected to libgfortran.h")
@@ -328,7 +328,7 @@ jobs:
           p2 = pathlib.Path('libquadmath/quadmath.h')
           if p2.exists():
               s = p2.read_text()
-              if 'ngx_tls_aligner' not in s:
+              if 'gfortran_tls_aligner' not in s:
                   s = s.replace('#ifndef QUADMATH_H', '#ifndef QUADMATH_H\n' + pin)
                   p2.write_text(s)
                   print("✅ Injected to quadmath.h")
